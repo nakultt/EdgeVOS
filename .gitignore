@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch / Models
+*.pt
+*.pth
+*.ckpt
+
+# Datasets and cache
+data/COCO/
+data/sam3_targets/
+
+# Virtual environments
+.env
+venv/
+env/
+ENV/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Build / Distributions
+build/
+dist/
+*.egg-info/
+annotations_trainval2017.zip
