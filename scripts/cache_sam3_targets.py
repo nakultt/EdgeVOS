@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
+import numpy as np
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
@@ -77,14 +78,17 @@ def build_sam3(device: str):
     [cx, cy, w, h] normalised [0,1] format and runs grounding inference.
     """
     from sam3.model_builder import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor
 
     print("[cache] Building SAM 3.1 model ...")
-    model = build_sam3_image_model(device=device, eval_mode=True)
-    # Set confidence threshold very low so box-prompted results aren't filtered
-    processor = Sam3Processor(model=model, device=device, confidence_threshold=0.01)
+    model = build_sam3_image_model(
+        device=device,
+        enable_segmentation=True,
+        enable_inst_interactivity=True,
+        eval_mode=True
+    )
+    predictor = model.inst_interactive_predictor
     print(f"[cache] SAM 3.1 ready | GPU mem: {gpu_mem_mb():.0f} MB")
-    return model, processor
+    return model, predictor
 
 
 def coco_to_xyxy(bbox_xywh) -> list:
@@ -122,8 +126,7 @@ def load_annotations(coco_root: str, split: str):
 # ── Core extraction ──────────────────────────────────────────────────
 
 def extract_target_from_box(
-    processor,
-    state:     Dict,
+    predictor,
     img_size:  tuple,
     bbox_xyxy: list,
     mask_size: int,
@@ -142,7 +145,7 @@ def extract_target_from_box(
 
     Parameters
     ----------
-    processor  : Sam3Processor
+    predictor  : SAM3InteractiveImagePredictor
     image      : PIL Image RGB
     bbox_xyxy  : [x1, y1, x2, y2] absolute pixel coordinates
     mask_size  : output spatial resolution (256)
@@ -152,51 +155,46 @@ def extract_target_from_box(
     dict: soft_logits [1, 256, 256] FP16 + boxes [4] FP32
     or None if SAM returns empty output
     """
-    img_w, img_h = img_size
-
-    # 2. Convert box to [cx, cy, w, h] normalised [0,1]
-    box_norm = xyxy_to_cxcywh_norm(bbox_xyxy, img_w, img_h)
-
-    # 3. Run box-prompted grounding
-    state = processor.add_geometric_prompt(
-        box=box_norm, label=True, state=state
-    )
-
-    # 4. Check outputs
-    if "masks_logits" not in state or state["masks_logits"] is None:
-        processor.reset_all_prompts(state)
+    # 1. predictor.predict expects np.ndarray of shape [4] in XYXY absolute pixels
+    box_np = np.array(bbox_xyxy)
+    
+    # 2. Run prediction
+    # multimask_output=False because we provide an unambiguous box prompt
+    # return_logits=True to get the pre-sigmoid 256x256 logits
+    try:
+        _, _, low_res_masks = predictor.predict(
+            box=box_np,
+            multimask_output=False,
+            return_logits=True,
+        )
+    except Exception as e:
+        print(f"\n[ERROR] Predictor inference failed: {e}")
         return None
 
-    mask_probs = state["masks_logits"]  # [N, 1, H, W] post-sigmoid probabilities
-    if mask_probs.numel() == 0:
-        processor.reset_all_prompts(state)
-        return None
-
-    # Pick the first (best) mask
-    mask_prob = mask_probs[0]  # [1, H, W]
-
-    # Check mask is non-degenerate
-    n_above = (mask_prob > 0.5).sum().item()
-    if n_above < 50:
-        processor.reset_all_prompts(state)
-        return None
-
-    # Recover pre-sigmoid logits for MSE distillation loss
-    logits = torch.logit(mask_prob.float().clamp(1e-6, 1.0 - 1e-6))
-
-    # Resize to target mask_size
-    logits_resized = F.interpolate(
-        logits.unsqueeze(0),         # [1, 1, H, W]
-        size=(mask_size, mask_size),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0)                      # [1, mask_size, mask_size]
-
-    # Reset prompts so next call starts fresh
-    processor.reset_all_prompts(state)
+    # low_res_masks shape: [1, 1, 256, 256] (or maybe [1, 256, 256]?)
+    if not isinstance(low_res_masks, torch.Tensor):
+        logits = torch.from_numpy(low_res_masks).float()
+    else:
+        logits = low_res_masks.float()
+        
+    if logits.ndim == 4:
+        logits = logits.squeeze(0).squeeze(0)  # -> [256, 256]
+    elif logits.ndim == 3:
+        logits = logits.squeeze(0)  # -> [256, 256]
+        
+    # Resize to target mask_size if it's not 256
+    if logits.shape[0] != mask_size or logits.shape[1] != mask_size:
+        logits_resized = F.interpolate(
+            logits.unsqueeze(0).unsqueeze(0),
+            size=(mask_size, mask_size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0).squeeze(0)
+    else:
+        logits_resized = logits
 
     return {
-        "soft_logits": logits_resized.half().cpu(),   # [1, 256, 256] FP16
+        "soft_logits": logits_resized.unsqueeze(0).half().cpu(),   # [1, mask_size, mask_size] FP16
         "boxes":       torch.tensor(bbox_xyxy, dtype=torch.float32),  # [4] xyxy
     }
 
@@ -275,12 +273,11 @@ def main() -> None:
         return
 
     # Build SAM 3.1
-    model, processor = build_sam3(device)
+    model, predictor = build_sam3(device)
 
     # Preload image cache (avoid re-opening same image for multiple annotations)
     current_img_id   = None
     current_img_pil  = None
-    current_state    = None
 
     saved = 0
     skipped_empty = 0
@@ -301,9 +298,10 @@ def main() -> None:
                 current_img_pil = Image.open(img_path).convert("RGB")
                 current_img_id  = img_id
                 
-                # Encode image ONCE per image_id
+                # Encode image ONCE per image_id using numpy array
+                img_np = np.array(current_img_pil)
                 with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device == "cuda")):
-                    current_state = processor.set_image(current_img_pil)
+                    predictor.set_image(img_np)
             except Exception as e:
                 tqdm.write(f"[WARN] Cannot open {img_path}: {e}")
                 errors += 1
@@ -313,7 +311,7 @@ def main() -> None:
         try:
             with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device == "cuda")):
                 target = extract_target_from_box(
-                    processor, current_state, current_img_pil.size, bbox_xyxy, args.mask_size
+                    predictor, current_img_pil.size, bbox_xyxy, args.mask_size
                 )
         except Exception as e:
             tqdm.write(f"[WARN] SAM inference error on ann {ann_id}: {e}")
