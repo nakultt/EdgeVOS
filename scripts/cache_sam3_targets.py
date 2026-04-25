@@ -123,7 +123,8 @@ def load_annotations(coco_root: str, split: str):
 
 def extract_target_from_box(
     processor,
-    image:     Image.Image,
+    state:     Dict,
+    img_size:  tuple,
     bbox_xyxy: list,
     mask_size: int,
 ) -> Optional[Dict[str, torch.Tensor]]:
@@ -151,10 +152,7 @@ def extract_target_from_box(
     dict: soft_logits [1, 256, 256] FP16 + boxes [4] FP32
     or None if SAM returns empty output
     """
-    img_w, img_h = image.size
-
-    # 1. Encode image
-    state = processor.set_image(image)
+    img_w, img_h = img_size
 
     # 2. Convert box to [cx, cy, w, h] normalised [0,1]
     box_norm = xyxy_to_cxcywh_norm(bbox_xyxy, img_w, img_h)
@@ -250,6 +248,9 @@ def main() -> None:
             continue
         valid.append(ann)
 
+    # Sort by image_id so we process all annotations for an image consecutively
+    valid.sort(key=lambda x: x["image_id"])
+
     # Optional cap for testing
     if args.max_anns is not None:
         valid = valid[:args.max_anns]
@@ -279,6 +280,7 @@ def main() -> None:
     # Preload image cache (avoid re-opening same image for multiple annotations)
     current_img_id   = None
     current_img_pil  = None
+    current_state    = None
 
     saved = 0
     skipped_empty = 0
@@ -298,6 +300,10 @@ def main() -> None:
             try:
                 current_img_pil = Image.open(img_path).convert("RGB")
                 current_img_id  = img_id
+                
+                # Encode image ONCE per image_id
+                with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device == "cuda")):
+                    current_state = processor.set_image(current_img_pil)
             except Exception as e:
                 tqdm.write(f"[WARN] Cannot open {img_path}: {e}")
                 errors += 1
@@ -307,7 +313,7 @@ def main() -> None:
         try:
             with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device == "cuda")):
                 target = extract_target_from_box(
-                    processor, current_img_pil, bbox_xyxy, args.mask_size
+                    processor, current_state, current_img_pil.size, bbox_xyxy, args.mask_size
                 )
         except Exception as e:
             tqdm.write(f"[WARN] SAM inference error on ann {ann_id}: {e}")
