@@ -77,9 +77,19 @@ def distillation_loss(
       2. Dice: quality of predicted binary mask
       3. Boundary: preserve sharp edges (SAM 3.1 improved boundary quality)
     """
-    loss_soft = F.mse_loss(pred_logits, teacher_logits.detach())
+    # Foreground-weighted MSE — background pixels get 0.1 weight
+    # Otherwise 88% background dominates and foreground never learns
+    fg_mask = (gt_masks > 0.5).float()
+    bg_mask = 1.0 - fg_mask
+    pixel_weights = fg_mask * 1.0 + bg_mask * 0.1   # foreground 10x more important
+
+    # Apply pixel weights to the MSE loss
+    # using .mean() directly after multiplication averages over all pixels
+    loss_soft = (pixel_weights * (pred_logits - teacher_logits.detach())**2).mean()
+    
     loss_dice = _dice_loss(pred_logits.sigmoid(), gt_masks.float())
     loss_bnd  = _boundary_loss(pred_logits.sigmoid(), gt_masks.float())
+    
     return soft_weight * loss_soft + dice_weight * loss_dice + boundary_weight * loss_bnd
 
 
