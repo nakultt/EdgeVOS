@@ -6,8 +6,15 @@ Run:
   python train/distill_mask.py --config-name base
 """
 
-import os, torch, wandb
+import os
+import sys
+import torch
+import wandb
 import torch.nn.functional as F
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from torch.utils.data import DataLoader
 import timm
 import hydra
@@ -88,7 +95,7 @@ def main(cfg: DictConfig) -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.distill.epochs, eta_min=1e-6
     )
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
     # ── Training loop ──────────────────────────────────────────────
     best_loss = float("inf")
@@ -104,7 +111,7 @@ def main(cfg: DictConfig) -> None:
             gt_masks = (soft_targets.sigmoid() > 0.5).float()
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 pred_logits = model(images)
                 # Resize soft targets to match pred size if needed
                 if soft_targets.shape != pred_logits.shape:

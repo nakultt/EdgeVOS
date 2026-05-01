@@ -1,0 +1,18 @@
+loading annotations into memory...
+Done (t=11.82s)
+creating index...
+index created!
+COCO distill: 0 images with cached targets
+Error executing job with overrides: ['distill.epochs=2', 'distill.batch_size=4', 'data.num_workers=2']
+Traceback (most recent call last):
+  File "E:\Github\EdgeVOS\train\distill_mask.py", line 79, in main
+    loader = DataLoader(
+             ^^^^^^^^^^^
+  File "C:\Users\nakul\anaconda3\envs\edgevos\Lib\site-packages\torch\utils\data\dataloader.py", line 394, in __init__
+    sampler = RandomSampler(dataset, generator=generator)  # type: ignore[arg-type]
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nakul\anaconda3\envs\edgevos\Lib\site-packages\torch\utils\data\sampler.py", line 149, in __init__
+    raise ValueError(
+ValueError: num_samples should be a positive integer value, but got num_samples=0
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.

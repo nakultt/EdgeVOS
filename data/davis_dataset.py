@@ -92,34 +92,47 @@ class COCODistillDataset(Dataset):
         from pycocotools.coco import COCO
         self.coco     = COCO(f"{coco_root}/annotations/instances_{split}.json")
         self.img_dir  = Path(coco_root) / split
-        self.targets  = Path(targets_dir)
+        # Point to the actual subfolder containing the .pt files
+        self.targets_root = Path(targets_dir) / split
         self.img_size = img_size
 
-        # Only keep images that have pre-generated targets
-        all_ids = self.coco.getImgIds()
-        self.img_ids = [
-            i for i in all_ids
-            if (self.targets / f"{i}.pt").exists()
-        ]
-        print(f"COCO distill: {len(self.img_ids)} images with cached targets")
+        if not self.targets_root.exists():
+            print(f"[WARN] Targets directory not found: {self.targets_root}")
+            self.ann_ids = []
+        else:
+            # Only keep annotation IDs that have pre-generated targets (ann_{id}.pt)
+            all_pt_files = list(self.targets_root.glob("ann_*.pt"))
+            self.ann_ids = []
+            for f in all_pt_files:
+                try:
+                    # Extract ID from 'ann_1234.pt'
+                    aid = int(f.stem.split("_")[1])
+                    self.ann_ids.append(aid)
+                except (IndexError, ValueError):
+                    continue
+        
+        print(f"COCO distill: {len(self.ann_ids)} annotations with cached targets in {self.targets_root}")
 
     def __len__(self) -> int:
-        return len(self.img_ids)
+        return len(self.ann_ids)
 
     def __getitem__(self, idx: int) -> dict:
-        img_id   = self.img_ids[idx]
+        ann_id = self.ann_ids[idx]
+        ann_info = self.coco.loadAnns([ann_id])[0]
+        img_id   = ann_info["image_id"]
         img_info = self.coco.loadImgs(img_id)[0]
 
         img = Image.open(self.img_dir / img_info["file_name"]).convert("RGB")
         img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
         img_tensor = torch.from_numpy(np.array(img)).permute(2,0,1).float() / 255.0
 
-        # Load pre-cached SAM 3.1 soft targets
-        target = torch.load(self.targets / f"{img_id}.pt", map_location="cpu")
+        # Load pre-cached SAM 3.1 soft targets (ann_{id}.pt)
+        target = torch.load(self.targets_root / f"ann_{ann_id}.pt", map_location="cpu")
 
         return {
+            "ann_id":       ann_id,
             "img_id":       img_id,
             "image":        img_tensor,            # [3, 224, 224]
             "soft_logits":  target["soft_logits"], # [1, 256, 256] FP16
-            "boxes":        target["boxes"],        # [N, 4] xyxy
+            "boxes":        target["boxes"],        # [4] xyxy
         }

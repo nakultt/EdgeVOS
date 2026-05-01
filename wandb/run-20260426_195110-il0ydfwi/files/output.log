@@ -1,0 +1,35 @@
+loading annotations into memory...
+Done (t=12.08s)
+creating index...
+index created!
+COCO distill: 52933 annotations with cached targets in data\sam3_targets\train2017
+[2026-04-26 19:51:28,694][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/repvit_m1.dist_in1k)
+[2026-04-26 19:51:29,139][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/timm/repvit_m1.dist_in1k/resolve/main/model.safetensors "HTTP/1.1 302 Found"
+[2026-04-26 19:51:29,153][timm.models._hub][INFO] - [timm/repvit_m1.dist_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+[2026-04-26 19:51:29,266][timm.models._builder][INFO] - Missing keys (head.head.l.weight, head.head.l.bias, head.head_dist.l.weight, head.head_dist.l.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
+E:\Github\EdgeVOS\train\distill_mask.py:98: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler()
+Epoch 1:   0%|                                                                                                                   | 0/13233 [00:00<?, ?it/s]E:\Github\EdgeVOS\train\distill_mask.py:114: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast():
+Epoch 1:   0%|                                                                                                                   | 0/13233 [00:37<?, ?it/s]
+Error executing job with overrides: ['distill.epochs=2', 'distill.batch_size=4', 'data.num_workers=2']
+Traceback (most recent call last):
+  File "E:\Github\EdgeVOS\train\distill_mask.py", line 125, in main
+    loss = distillation_loss(
+           ^^^^^^^^^^^^^^^^^^
+  File "E:\Github\EdgeVOS\models\mask_head.py", line 91, in distillation_loss
+    loss_bnd  = _boundary_loss(pred_logits.sigmoid(), gt_masks.float())
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\Github\EdgeVOS\models\mask_head.py", line 111, in _boundary_loss
+    return F.binary_cross_entropy(boundary_pred, boundary_gt)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nakul\anaconda3\envs\edgevos\Lib\site-packages\torch\nn\functional.py", line 3574, in binary_cross_entropy
+    return torch._C._nn.binary_cross_entropy(input, target, weight, reduction_enum)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: torch.nn.functional.binary_cross_entropy and torch.nn.BCELoss are unsafe to autocast.
+Many models use a sigmoid layer right before the binary cross entropy layer.
+In this case, combine the two layers using torch.nn.functional.binary_cross_entropy_with_logits
+or torch.nn.BCEWithLogitsLoss.  binary_cross_entropy_with_logits and BCEWithLogits are
+safe to autocast.
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.

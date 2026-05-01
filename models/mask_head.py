@@ -108,4 +108,5 @@ def _boundary_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     ).view(1, 1, 3, 3)
     boundary_gt   = F.conv2d(target,   laplacian, padding=1).abs().clamp(0, 1)
     boundary_pred = F.conv2d(pred,     laplacian, padding=1).abs().clamp(0, 1)
-    return F.binary_cross_entropy(boundary_pred, boundary_gt)
+    with torch.amp.autocast('cuda', enabled=False):
+        return F.binary_cross_entropy(boundary_pred.float(), boundary_gt.float())

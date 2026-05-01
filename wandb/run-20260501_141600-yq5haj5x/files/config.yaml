@@ -1,0 +1,143 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            2628pmynp7lkr27lb23u9fryybte5vlu:
+                args:
+                    - distill.epochs=2
+                    - distill.batch_size=4
+                    - data.num_workers=2
+                codePath: train\distill_mask.py
+                codePathLocal: train\distill_mask.py
+                cpu_count: 20
+                cpu_count_logical: 28
+                cudaVersion: "13.2"
+                disk:
+                    /:
+                        total: "107793608704"
+                        used: "37906591744"
+                email: nakulnuked@gmail.com
+                executable: C:\Users\nakul\anaconda3\envs\edgevos\python.exe
+                git:
+                    commit: bf98ea9519b8559e91be16a22f165810fc1b33d3
+                    remote: https://github.com/nakultt/EdgeVOS.git
+                gpu: NVIDIA GeForce RTX 4060 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 3072
+                      memoryTotal: "8585740288"
+                      name: NVIDIA GeForce RTX 4060 Laptop GPU
+                      uuid: GPU-412c035f-e544-fa79-713a-2d8071a00db5
+                host: RAW
+                memory:
+                    total: "34124718080"
+                os: Windows-10-10.0.26200-SP0
+                program: E:\Github\EdgeVOS\train\distill_mask.py
+                python: CPython 3.11.9
+                root: E:\Github\EdgeVOS
+                startedAt: "2026-05-01T08:46:00.949298Z"
+                writerId: 2628pmynp7lkr27lb23u9fryybte5vlu
+        m: []
+        python_version: 3.11.9
+        t:
+            "1":
+                - 1
+                - 41
+                - 49
+                - 50
+                - 63
+            "2":
+                - 1
+                - 41
+                - 49
+                - 50
+                - 63
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.11.9
+            "5": 0.25.1
+            "8":
+                - 3
+            "12": 0.25.1
+            "13": windows-amd64
+data:
+    value:
+        coco_root: data/COCO
+        davis_root: data/DAVIS
+        img_size: 224
+        num_workers: 2
+        sam3_targets_dir: data/sam3_targets
+distill:
+    value:
+        batch_size: 4
+        epochs: 2
+        loss_boundary_weight: 0.2
+        loss_dice_weight: 0.5
+        loss_soft_weight: 1
+        lr: 0.0001
+        target_iou: 0.9
+        teacher_model: sam3
+        warmup_epochs: 3
+        weight_decay: 0.01
+eval:
+    value:
+        benchmark_k_values:
+            - 1
+            - 3
+            - 5
+            - 10
+            - 20
+        davis_resolution: 480p
+        davis_split: val
+        youtube_vos_root: data/YouTube-VOS
+export:
+    value:
+        int8_calibration_samples: 500
+        target_device: jetson_orin_nano
+        target_fps: 15
+        trt_version: 10.x
+model:
+    value:
+        backbone: repvit_m1
+        backbone_pretrained: true
+        dinov3_feat_dim: 384
+        dinov3_model: facebook/dinov3-small
+        dinov3_patch_size: 16
+        mask_head_dims:
+            - 384
+            - 512
+            - 256
+        mask_out_size: 256
+        stgp_proj_dim: 256
+        text_encoder: MobileCLIP2-S2
+        text_encoder_pretrained: dfndr2b
+project:
+    value:
+        name: edgevos
+        seed: 42
+        version: "1.0"
+stgp:
+    value:
+        drift_frames: 3
+        ghost_confirm_frames: 5
+        keyframe_interval: 5
+        regrounding_interval: 150
+        sim_threshold_recover: 0.55
+        sim_threshold_trigger: 0.45
+        topk_patches: 30
+stgp_train:
+    value:
+        batch_size: 64
+        epochs: 20
+        lr: 0.0005
+        negatives_per_positive: 15
+        temperature: 0.07
+wandb:
+    value:
+        entity: null
+        log_images_every: 500
+        log_interval: 10
+        project: edgevos
