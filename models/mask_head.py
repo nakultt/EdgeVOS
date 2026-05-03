@@ -63,6 +63,48 @@ class MLPMaskHead(nn.Module):
         return upsampled.sigmoid() > threshold
 
 
+class SpatialMaskHead(nn.Module):
+    """
+    Lightweight convolutional decoder for spatial feature maps.
+    Input:  [B, C, 14, 14]
+    Output: [B, 1, out_size, out_size] mask logits.
+    """
+
+    def __init__(self, in_channels: int = 384, out_size: int = 256):
+        super().__init__()
+        self.out_size = out_size
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.GELU(),
+        )
+        self.blocks = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.Conv2d(32, 1, kernel_size=1),
+        )
+
+    def forward(self, feat_map: torch.Tensor) -> torch.Tensor:
+        x = self.proj(feat_map)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = self.blocks(x)
+        if x.shape[-2:] != (self.out_size, self.out_size):
+            x = F.interpolate(
+                x, size=(self.out_size, self.out_size),
+                mode="bilinear", align_corners=False
+            )
+        return x
+
+
 def distillation_loss(
     pred_logits:    torch.Tensor,   # [B, 1, 256, 256] student output
     teacher_logits: torch.Tensor,   # [B, 1, 256, 256] SAM 3.1 soft targets

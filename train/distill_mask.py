@@ -16,43 +16,34 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from torch.utils.data import DataLoader
-import timm
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 # Internal
-from models.mask_head import MLPMaskHead, distillation_loss
+from models.backbone import BackboneWithRoI
+from models.mask_head import SpatialMaskHead, distillation_loss
 from data.davis_dataset import COCODistillDataset
 
 
 class StudentModel(torch.nn.Module):
-    """RepViT-M1 backbone + MLP mask head."""
+    """RepViT-M1 image-to-mask student. Prediction does not take boxes."""
 
     def __init__(self, cfg):
         super().__init__()
-        self.backbone = timm.create_model(
-            "repvit_m1", pretrained=True, features_only=True
+        self.backbone = BackboneWithRoI(
+            model_name=cfg.model.backbone,
+            pretrained=cfg.model.backbone_pretrained,
         )
-        self.mask_head = MLPMaskHead(
-            in_dim=384,
-            hidden_dims=tuple(cfg.model.mask_head_dims[1:]),
+        self.mask_head = SpatialMaskHead(
+            in_channels=self.backbone.feat_channels,
             out_size=cfg.model.mask_out_size,
-        )
-        # Project backbone output → 384 dim for mask head input
-        backbone_out_dim = self.backbone.feature_info[-1]["num_chs"]
-        self.adapter = torch.nn.Sequential(
-            torch.nn.AdaptiveAvgPool2d(1),
-            torch.nn.Flatten(),
-            torch.nn.Linear(backbone_out_dim, 384),
-            torch.nn.LayerNorm(384),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, 3, 224, 224] → [B, 1, 256, 256] mask logits"""
-        feats   = self.backbone(x)[-1]     # Last feature map
-        roi_feat = self.adapter(feats)      # [B, 384]
-        return self.mask_head(roi_feat)     # [B, 1, 256, 256]
+        """x: [B, 3, 224, 224] object crops -> [B, 1, 256, 256] mask logits."""
+        feat_map = self.backbone._extract_feature_map(x)
+        return self.mask_head(feat_map)
 
 
 @hydra.main(config_path="../configs", config_name="base", version_base=None)
