@@ -1,0 +1,14 @@
+loading annotations into memory...
+Done (t=10.20s)
+creating index...
+index created!
+COCO distill: 52933 annotations with cached targets in data\sam3_targets\train2017
+[2026-05-26 22:13:16,759][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/repvit_m1.dist_in1k)
+[2026-05-26 22:13:17,374][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/timm/repvit_m1.dist_in1k/resolve/main/model.safetensors "HTTP/1.1 302 Found"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[2026-05-26 22:13:17,375][huggingface_hub.utils._http][WARNING] - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[2026-05-26 22:13:17,384][timm.models._hub][INFO] - [timm/repvit_m1.dist_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+[2026-05-26 22:13:17,465][timm.models._builder][INFO] - Missing keys (head.head.l.weight, head.head.l.bias, head.head_dist.l.weight, head.head_dist.l.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
+Epoch 1: 100%|█████████████████████████████████████████████████████████████████████████████████████████| 1654/1654 [08:21<00:00,  3.30it/s]
+Epoch 1 | avg_loss=3.5350
+  Saved best checkpoint (loss=3.5350)

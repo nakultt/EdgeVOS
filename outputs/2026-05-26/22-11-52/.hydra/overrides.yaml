@@ -1,0 +1,2 @@
+- distill.epochs=30
+- distill.batch_size=32
