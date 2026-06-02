@@ -29,3 +29,6 @@ build/
 dist/
 *.egg-info/
 annotations_trainval2017.zip
+DAVIS/
+outputs
+wandb

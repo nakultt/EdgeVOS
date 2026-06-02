@@ -12,7 +12,7 @@ model:
   backbone_pretrained: true
   text_encoder: MobileCLIP2-S2 # For M4 re-grounding (open_clip)
   text_encoder_pretrained: dfndr2b
-  dinov3_model: facebook/dinov3-small  # STGP feature extractor
+  dinov3_model: facebook/dinov3-vits16-pretrain-lvd1689m  # STGP feature extractor
   dinov3_patch_size: 16
   dinov3_feat_dim: 384
   stgp_proj_dim: 256           # 384 → 256 projection
