@@ -225,7 +225,7 @@ def main(cfg: DictConfig):
     )
     val_loader = DataLoader(
         val_dataset, batch_size=train_bs, shuffle=False,
-        num_workers=cfg.data.num_workers, drop_last=True
+        num_workers=cfg.data.num_workers, drop_last=False
     )
     
     # Models
@@ -342,10 +342,10 @@ def main(cfg: DictConfig):
                 correct_top1 += (max_idx == torch.arange(q.size(0), device=device)).sum().item()
                 total_samples += q.size(0)
                 
-        val_loss /= len(val_loader)
-        val_pos_sim /= len(val_loader)
-        val_neg_sim /= len(val_loader)
-        val_acc = correct_top1 / total_samples
+        val_loss /= max(1, len(val_loader))
+        val_pos_sim /= max(1, len(val_loader))
+        val_neg_sim /= max(1, len(val_loader))
+        val_acc = correct_top1 / max(1, total_samples)
         
         print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Pos Sim: {val_pos_sim:.4f} | Neg Sim: {val_neg_sim:.4f}")
         
