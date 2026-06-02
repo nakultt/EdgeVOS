@@ -263,9 +263,9 @@ def main(cfg: DictConfig):
             mask2 = batch["mask2"].to(device)
             
             with torch.no_grad():
-                # DINOv3 output has shape [B, 197, 384] (1 CLS + 196 patches)
-                out1 = dinov3(img1).last_hidden_state[:, 1:, :] # [B, 196, 384]
-                out2 = dinov3(img2).last_hidden_state[:, 1:, :]
+                # DINOv3 uses 1 CLS + 4 register tokens. The 196 patch tokens are at the end.
+                out1 = dinov3(img1).last_hidden_state[:, -196:, :] # [B, 196, 384]
+                out2 = dinov3(img2).last_hidden_state[:, -196:, :]
                 
                 feat1_384 = mask_pool_features(out1, mask1) # [B, 384]
                 feat2_384 = mask_pool_features(out2, mask2)
@@ -318,8 +318,8 @@ def main(cfg: DictConfig):
                 img2 = batch["img2"].to(device)
                 mask2 = batch["mask2"].to(device)
                 
-                out1 = dinov3(img1).last_hidden_state[:, 1:, :]
-                out2 = dinov3(img2).last_hidden_state[:, 1:, :]
+                out1 = dinov3(img1).last_hidden_state[:, -196:, :]
+                out2 = dinov3(img2).last_hidden_state[:, -196:, :]
                 
                 feat1_384 = mask_pool_features(out1, mask1)
                 feat2_384 = mask_pool_features(out2, mask2)
