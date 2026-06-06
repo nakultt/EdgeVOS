@@ -178,6 +178,9 @@ def main(cfg: DictConfig) -> None:
                        cfg.distill.loss_boundary_weight * loss_bnd).mean()
 
             scaler.scale(loss).backward()
+            
+            # Unscale before clipping so we compute the true gradient norm
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
             # Warmup LR adjustment
