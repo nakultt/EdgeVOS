@@ -165,7 +165,7 @@ class EdgeVOSPipeline:
         ).to(self.device)
         with torch.no_grad():
             out = self.dinov3(pixel_values=inp, output_hidden_states=True)
-        return out.last_hidden_state[0, 1:]  # [196, 384] — remove CLS
+        return out.last_hidden_state[0, -196:]  # [196, 384] — select patch tokens only
 
     def _extract_dinov3_feat(
         self, frame: torch.Tensor, mask: torch.Tensor

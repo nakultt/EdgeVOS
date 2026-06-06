@@ -26,7 +26,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Load checkpoint
 ckpt = torch.load('checkpoints/best_distill.pt', map_location=device)
 print(f"Checkpoint epoch : {ckpt['epoch']}")
-print(f"Checkpoint loss  : {ckpt['loss']:.4f}")
+metric_str = f"Val IoU: {ckpt['val_iou']:.4f}" if 'val_iou' in ckpt else f"Loss: {ckpt.get('loss', 0):.4f}"
+print(f"Checkpoint metric: {metric_str}")
 
 cfg = OmegaConf.create(ckpt["cfg"])
 cfg.model.backbone_pretrained = False
