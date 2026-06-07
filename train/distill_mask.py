@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 # Internal
 from models.backbone import BackboneWithRoI
-from models.mask_head import MLPMaskHead, distillation_loss
+from models.mask_head import MLPMaskHead, distillation_loss, _dice_loss, _boundary_loss
 from data.davis_dataset import COCODistillDataset
 
 
@@ -161,14 +161,13 @@ def main(cfg: DictConfig) -> None:
                         gt_masks, size=pred_logits.shape[-2:], mode="nearest"
                     )
                 
-                # Foreground-weighted BCE (Teacher soft targets are probabilities, so apply sigmoid)
+                # Foreground-weighted MSE for raw logit distillation
                 fg_mask = (gt_masks > 0.5).float()
                 bg_mask = 1.0 - fg_mask
                 pixel_weights = fg_mask * 1.0 + bg_mask * 0.1
                 
-                loss_soft = F.binary_cross_entropy_with_logits(
-                    pred_logits, soft_targets.sigmoid().detach(), weight=pixel_weights
-                )
+                # MSE on raw logits preserves the teacher's dark knowledge and provides strong gradients
+                loss_soft = (pixel_weights * (pred_logits - soft_targets.detach())**2).mean()
                 
                 loss_dice = _dice_loss(pred_logits.sigmoid(), gt_masks)
                 loss_bnd  = _boundary_loss(pred_logits.sigmoid(), gt_masks)

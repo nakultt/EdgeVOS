@@ -132,7 +132,7 @@ class STGPGraph:
         frame_patches: torch.Tensor,   # [196, 384] DINOv3 patches for full frame
         frame_t:       int,
         new_mask:      Optional[torch.Tensor] = None,  # [H, W] from M2, if keyframe
-    ) -> Tuple[torch.Tensor, torch.Tensor, bool]:
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], bool, Optional[str]]:
         """
         One frame of STGP propagation for one object.
 
@@ -140,10 +140,11 @@ class STGPGraph:
             sims:           [196] cosine similarity per patch
             topk_indices:   [topk_patches] indices of highest-similarity patches
             needs_regrounding: True if M4 should be triggered
+            trigger_reason: Optional[str] reason for re-grounding ("primary", "tertiary", "lost", or None)
         """
         node = self.latest(obj_id)
         if node is None or node.state == NodeState.LOST:
-            return None, None, True
+            return None, None, True, "lost"
 
         # Project frame patches to 256-dim
         with torch.no_grad():
@@ -172,19 +173,24 @@ class STGPGraph:
 
         # Mark occluded if below threshold for drift_frames consecutive frames
         needs_regrounding = False
+        trigger_reason = None
         if self._below_thresh_count[obj_id] >= self.drift_frames:
             node.state = NodeState.OCCLUDED
             needs_regrounding = True
+            trigger_reason = "primary"
 
         # Scheduled re-grounding regardless of confidence
         if frame_t - self._last_reground_t[obj_id] >= self.regrounding_interval:
             needs_regrounding = True
+            # Prefer primary if both trigger
+            if trigger_reason is None:
+                trigger_reason = "tertiary"
 
         # Add new keyframe node
         if frame_t % self.K == 0 and new_mask is not None and not needs_regrounding:
             self._add_keyframe_node(obj_id, frame_patches, new_mask, frame_t, max_sim)
 
-        return sims, topk_indices, needs_regrounding
+        return sims, topk_indices, needs_regrounding, trigger_reason
 
     def add_regrounding_node(
         self,

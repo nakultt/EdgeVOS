@@ -31,6 +31,7 @@ class EdgeVOSPipeline:
         regrounding:        RegroundingController,
         cfg,                # OmegaConf config
         device:             str = "cuda",
+        backbone = None,    # Student backbone (M2 feature extraction)
     ):
         self.sam3    = sam3_model
         self.dinov3  = dinov3_model
@@ -38,6 +39,7 @@ class EdgeVOSPipeline:
         self.rg      = regrounding
         self.device  = device
         self.cfg     = cfg
+        self.backbone = backbone
 
         # Build fresh STGP graph for each video
         self.graph = STGPGraph(
@@ -51,6 +53,7 @@ class EdgeVOSPipeline:
             ghost_confirm        = cfg.stgp.ghost_confirm_frames,
         )
         self._last_bboxes: Dict[int, torch.Tensor] = {}
+        self._last_triggers: Dict[int, Optional[str]] = {}
         self._frame_count = 0
 
     # ── Public API ─────────────────────────────────────────────────
@@ -86,6 +89,7 @@ class EdgeVOSPipeline:
         feat_384 = self._extract_dinov3_feat(frame, mask)
         self.graph.init_object(obj_id, feat_384, mask, frame_t=0)
         self._last_bboxes[obj_id] = bbox
+        self._last_triggers[obj_id] = None
 
         return mask
 
@@ -93,6 +97,7 @@ class EdgeVOSPipeline:
         self,
         frame:   torch.Tensor,   # [3, H, W]
         obj_ids: List[int],
+        disable_regrounding: bool = False,
     ) -> Dict[int, Optional[torch.Tensor]]:
         """
         Process one video frame for all tracked objects.
@@ -108,16 +113,40 @@ class EdgeVOSPipeline:
         results = {}
         for obj_id in obj_ids:
             # M3: STGP propagation
-            sims, topk_idx, needs_rg = self.graph.propagate(
+            sims, topk_idx, needs_rg, trigger_reason = self.graph.propagate(
                 obj_id, frame_patches, frame_t
             )
 
             if sims is None:
                 results[obj_id] = None
+                self._last_triggers[obj_id] = trigger_reason
                 continue
 
-            # Convert topk patches → bounding box estimate
-            pred_bbox = self._patches_to_bbox(topk_idx, H, W)
+            # Convert matched patches → bounding box estimate dynamically
+            max_sim = sims.max().item()
+            thresh = max(0.35, max_sim * 0.8)
+            valid_idx = torch.where(sims >= thresh)[0]
+            if valid_idx.numel() == 0:
+                valid_idx = sims.topk(3).indices
+            pred_bbox = self._patches_to_bbox(valid_idx, H, W)
+
+            # Secondary trigger: mask area jump > 50%
+            if not needs_rg:
+                prev_bbox = self._last_bboxes.get(obj_id)
+                if prev_bbox is not None:
+                    prev_area = max(1.0, (prev_bbox[2] - prev_bbox[0]) * (prev_bbox[3] - prev_bbox[1]))
+                    new_area = max(1.0, (pred_bbox[2] - pred_bbox[0]) * (pred_bbox[3] - pred_bbox[1]))
+                    ratio = new_area / prev_area
+                    if ratio > 1.5 or ratio < 0.5:
+                        needs_rg = True
+                        trigger_reason = "secondary"
+
+            # Record why we would trigger M4
+            self._last_triggers[obj_id] = trigger_reason if needs_rg else None
+
+            # Ablation bypass
+            if disable_regrounding:
+                needs_rg = False
 
             if needs_rg:
                 # M4: Re-grounding
@@ -125,9 +154,15 @@ class EdgeVOSPipeline:
                     obj_id, frame, self._last_bboxes.get(obj_id), frame_t
                 )
                 if best_bbox is not None:
-                    roi_feat = self._extract_roi_feat(frame_patches, best_bbox, H, W)
+                    expanded_bbox = self._expand_bbox(best_bbox, H, W)
+                    if self.backbone is not None:
+                        x1, y1, x2, y2 = expanded_bbox.tolist()
+                        norm_bbox = torch.tensor([[x1 / W, y1 / H, x2 / W, y2 / H]], dtype=torch.float32, device=self.device)
+                        roi_feat = self.backbone(frame.unsqueeze(0), norm_bbox).squeeze(0)
+                    else:
+                        roi_feat = self._extract_roi_feat(frame_patches, expanded_bbox, H, W)
                     new_mask = self.m2.predict_mask(
-                        roi_feat.unsqueeze(0), (H, W)
+                        roi_feat.unsqueeze(0), (H, W), expanded_bbox.unsqueeze(0)
                     ).squeeze()
                     feat_384 = self._extract_dinov3_feat(frame, new_mask)
                     self.graph.add_regrounding_node(
@@ -139,9 +174,15 @@ class EdgeVOSPipeline:
                     results[obj_id] = None
             else:
                 # M2: Generate mask from predicted region
-                roi_feat = self._extract_roi_feat(frame_patches, pred_bbox, H, W)
+                expanded_bbox = self._expand_bbox(pred_bbox, H, W)
+                if self.backbone is not None:
+                    x1, y1, x2, y2 = expanded_bbox.tolist()
+                    norm_bbox = torch.tensor([[x1 / W, y1 / H, x2 / W, y2 / H]], dtype=torch.float32, device=self.device)
+                    roi_feat = self.backbone(frame.unsqueeze(0), norm_bbox).squeeze(0)
+                else:
+                    roi_feat = self._extract_roi_feat(frame_patches, expanded_bbox, H, W)
                 mask = self.m2.predict_mask(
-                    roi_feat.unsqueeze(0), (H, W)
+                    roi_feat.unsqueeze(0), (H, W), expanded_bbox.unsqueeze(0)
                 ).squeeze()
                 self._last_bboxes[obj_id] = pred_bbox
 
@@ -214,3 +255,15 @@ class EdgeVOSPipeline:
         x2 = ((cols.max().item() + 1) * patch_w)
         y2 = ((rows.max().item() + 1) * patch_h)
         return torch.tensor([x1, y1, x2, y2])
+
+    def _expand_bbox(self, bbox: torch.Tensor, H: int, W: int, pad_ratio: float = 0.15) -> torch.Tensor:
+        """Expand bounding box by pad_ratio to match distillation crop scale."""
+        x1, y1, x2, y2 = bbox.tolist()
+        w = max(x2 - x1, 1.0)
+        h = max(y2 - y1, 1.0)
+        pad = max(w, h) * pad_ratio
+        ex1 = max(0.0, x1 - pad)
+        ey1 = max(0.0, y1 - pad)
+        ex2 = min(float(W), x2 + pad)
+        ey2 = min(float(H), y2 + pad)
+        return torch.tensor([ex1, ey1, ex2, ey2], dtype=torch.float32, device=bbox.device)

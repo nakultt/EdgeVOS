@@ -51,8 +51,8 @@ def main(cfg: DictConfig) -> None:
         
     distill_ckpt = torch.load(distill_ckpt_path, map_location=device)
     # Extract sub-components from StudentModel state dict
-    bb_state = {k.replace("backbone.", ""): v for k, v in distill_ckpt["model"].items() if k.startswith("backbone.")}
-    mh_state = {k.replace("mask_head.", ""): v for k, v in distill_ckpt["model"].items() if k.startswith("mask_head.")}
+    bb_state = {k.replace("backbone.", "", 1): v for k, v in distill_ckpt["model"].items() if k.startswith("backbone.")}
+    mh_state = {k.replace("mask_head.", "", 1): v for k, v in distill_ckpt["model"].items() if k.startswith("mask_head.")}
     
     backbone.load_state_dict(bb_state)
     mask_head.load_state_dict(mh_state)
@@ -62,7 +62,7 @@ def main(cfg: DictConfig) -> None:
     print("[3/5] Loading M3 STGP Projection (from checkpoints/best_stgp_proj.pt)...")
     stgp_proj = STGPProjection(
         in_dim=cfg.model.dinov3_feat_dim,
-        proj_dim=cfg.model.stgp_proj_dim
+        out_dim=cfg.model.stgp_proj_dim
     ).to(device)
     
     stgp_ckpt_path = "checkpoints/best_stgp_proj.pt"
@@ -70,7 +70,7 @@ def main(cfg: DictConfig) -> None:
         raise FileNotFoundError(f"Missing {stgp_ckpt_path}. Ensure STGP contrastive training is complete.")
         
     stgp_ckpt = torch.load(stgp_ckpt_path, map_location=device)
-    stgp_proj.load_state_dict(stgp_ckpt["model"])
+    stgp_proj.load_state_dict(stgp_ckpt)
     stgp_proj.eval()
     
     print("[4/5] Loading M4 Regrounding Controller (MobileCLIP2-S2)...")
@@ -85,7 +85,8 @@ def main(cfg: DictConfig) -> None:
         stgp_projection=stgp_proj,
         regrounding=regrounding,
         cfg=cfg,
-        device=device
+        device=device,
+        backbone=backbone
     )
     
     # Load Dataset

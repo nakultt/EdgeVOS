@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple
 import open_clip
+import numpy as np
+from PIL import Image
 
 
 class RegroundingController:
@@ -79,9 +81,9 @@ class RegroundingController:
         scores = []
         with torch.no_grad(), torch.cuda.amp.autocast():
             for crop in crops:
-                crop_input = self.preprocess(
-                    crop.permute(1, 2, 0).cpu().numpy()
-                ).unsqueeze(0).to(self.device)
+                crop_np = crop.permute(1, 2, 0).cpu().numpy()
+                crop_pil = Image.fromarray((crop_np * 255).astype(np.uint8))
+                crop_input = self.preprocess(crop_pil).unsqueeze(0).to(self.device)
                 img_feat = self.clip_model.encode_image(crop_input)
                 img_feat = F.normalize(img_feat, dim=-1)
                 score    = (text_feat @ img_feat.T).item()

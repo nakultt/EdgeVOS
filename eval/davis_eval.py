@@ -66,12 +66,29 @@ def evaluate_pipeline(pipeline, dataset: DAVISDataset, device: str = "cuda") -> 
         # Init pipeline on frame 0 with ground truth mask (standard VOS eval protocol)
         pipeline.graph = pipeline.graph.__class__(
             projection=pipeline.graph.proj,
+            keyframe_interval=pipeline.graph.K,
             **{k: getattr(pipeline.graph, k) for k in
-               ['K','sim_trigger','sim_recover','drift_frames',
+               ['sim_trigger','sim_recover','drift_frames',
                 'regrounding_interval','topk_patches','ghost_confirm']}
         )
         # Use GT mask at frame 0 for init (semi-supervised VOS protocol)
         gt_mask_t0 = torch.from_numpy(gt_masks[0]).to(device)
+        
+        # Reset stateful variables in pipeline
+        pipeline._frame_count = 0
+        pipeline.rg._text_cache = {}
+        pipeline.rg.register_text_prompt(0, text_prompt)
+        
+        y_indices, x_indices = torch.where(gt_mask_t0)
+        if y_indices.numel() > 0:
+            y1, y2 = y_indices.min().item(), y_indices.max().item() + 1
+            x1, x2 = x_indices.min().item(), x_indices.max().item() + 1
+            bbox = torch.tensor([x1, y1, x2, y2], dtype=torch.float32, device=device)
+        else:
+            H_f, W_f = frames.shape[2], frames.shape[3]
+            bbox = torch.tensor([0.0, 0.0, float(W_f), float(H_f)], dtype=torch.float32, device=device)
+        pipeline._last_bboxes = {0: bbox}
+
         feat_384 = pipeline._extract_dinov3_feat(frames[0], gt_mask_t0)
         pipeline.graph.init_object(0, feat_384, gt_mask_t0, frame_t=0)
 
@@ -102,7 +119,7 @@ def evaluate_pipeline(pipeline, dataset: DAVISDataset, device: str = "cuda") -> 
     print(f"\nDAVIS-2017 val results:")
     print(f"  J Mean:  {overall_J:.4f}")
     print(f"  F Mean:  {overall_F:.4f}")
-    print(f"  J&F Mean: {overall_JF:.4f}  ← primary metric")
+    print(f"  J&F Mean: {overall_JF:.4f}  <- primary metric")
 
     return {
         "J_mean":  overall_J,

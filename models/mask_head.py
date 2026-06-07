@@ -7,6 +7,7 @@ EdgeVOS — Module 2: MLP Mask Head (distilled from SAM 3.1 mask decoder)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 
 class MLPMaskHead(nn.Module):
@@ -45,22 +46,52 @@ class MLPMaskHead(nn.Module):
         self,
         roi_feat:       torch.Tensor,
         original_size:  tuple,
+        bbox:           Optional[torch.Tensor] = None,
         threshold:      float = 0.5,
     ) -> torch.Tensor:
         """
         Full inference: feature → upsampled binary mask at original resolution.
+        If bbox is provided, the mask is resized and pasted into the bbox region.
         Args:
             roi_feat:      [B, 384]
             original_size: (H, W) of original frame
+            bbox:          [B, 4] bounding boxes in absolute coordinates [x1, y1, x2, y2]
             threshold:     binarization threshold
         Returns:
             mask: [B, 1, H, W] bool tensor
         """
         logits = self.forward(roi_feat)                           # [B,1,256,256]
-        upsampled = F.interpolate(
-            logits, size=original_size, mode='bilinear', align_corners=False
-        )                                                          # [B,1,H,W]
-        return upsampled.sigmoid() > threshold
+        B = logits.shape[0]
+        H, W = original_size
+        
+        if bbox is not None:
+            # Output mask of shape [B, 1, H, W]
+            full_mask = torch.zeros((B, 1, H, W), dtype=torch.bool, device=logits.device)
+            # Apply sigmoid to logits to get probabilities
+            probs = logits.sigmoid()
+            
+            for i in range(B):
+                x1, y1, x2, y2 = bbox[i].tolist()
+                x1 = max(0, min(W - 1, int(round(x1))))
+                y1 = max(0, min(H - 1, int(round(y1))))
+                x2 = max(x1 + 1, min(W, int(round(x2))))
+                y2 = max(y1 + 1, min(H, int(round(y2))))
+                
+                box_w = x2 - x1
+                box_h = y2 - y1
+                
+                # Resize the 256x256 probability map to the bbox size
+                box_prob = F.interpolate(
+                    probs[i:i+1], size=(box_h, box_w), mode='bilinear', align_corners=False
+                )
+                box_mask = box_prob.squeeze(0).squeeze(0) > threshold
+                full_mask[i, 0, y1:y2, x1:x2] = box_mask
+            return full_mask
+        else:
+            upsampled = F.interpolate(
+                logits, size=original_size, mode='bilinear', align_corners=False
+            )                                                          # [B,1,H,W]
+            return upsampled.sigmoid() > threshold
 
 
 class SpatialMaskHead(nn.Module):
