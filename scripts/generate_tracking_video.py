@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.davis_dataset import DAVISDataset
 from models.stgp import STGPProjection
-from models.mask_head import MLPMaskHead
+from models.mask_head import SpatialMaskHead
 from models.regrounding import RegroundingController
 from models.backbone import BackboneWithRoI
 from inference.pipeline import EdgeVOSPipeline
@@ -35,9 +35,8 @@ def main(cfg: DictConfig):
     for p in dinov3.parameters(): p.requires_grad = False
         
     backbone = BackboneWithRoI(model_name="repvit_m1").to(device).eval()
-    mask_head = MLPMaskHead(
-        in_dim=cfg.model.mask_head_dims[0], 
-        hidden_dims=cfg.model.mask_head_dims[1:], 
+    mask_head = SpatialMaskHead(
+        in_channels=backbone.feat_channels,  # 384
         out_size=cfg.model.mask_out_size
     ).to(device).eval()
     
@@ -67,7 +66,7 @@ def main(cfg: DictConfig):
         backbone=backbone
     )
     
-    target_seq = "car-shadow" # Use 'car-shadow' sequence for visualization
+    target_seq = "dog" # Use 'dog' sequence for visualization
     seq = None
     for i in range(len(val_dataset)):
         if val_dataset[i]["name"] == target_seq:

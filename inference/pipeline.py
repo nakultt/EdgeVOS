@@ -156,8 +156,8 @@ class EdgeVOSPipeline:
                     obj_id, frame, self._last_bboxes.get(obj_id), frame_t
                 )
                 if best_bbox is not None:
-                    # Generate mask from DINOv3 patch similarities
-                    new_mask = self._sims_to_mask(sims, H, W)
+                    # Generate mask using trained SpatialMaskHead
+                    new_mask = self._decode_mask(frame, best_bbox, sims, H, W)
                     feat_384 = self._extract_dinov3_feat(frame, new_mask)
                     self.graph.add_regrounding_node(
                         obj_id, feat_384, new_mask, frame_t, score
@@ -167,8 +167,8 @@ class EdgeVOSPipeline:
                 else:
                     results[obj_id] = None
             else:
-                # Generate mask from DINOv3 patch similarities (spatial)
-                mask = self._sims_to_mask(sims, H, W)
+                # Generate mask using trained SpatialMaskHead
+                mask = self._decode_mask(frame, pred_bbox, sims, H, W)
                 self._last_bboxes[obj_id] = pred_bbox
 
                 # Add keyframe node if applicable
@@ -182,22 +182,106 @@ class EdgeVOSPipeline:
 
         return results
 
+    def _decode_mask(
+        self,
+        frame: torch.Tensor,       # [3, H, W]
+        bbox: torch.Tensor,        # [4] absolute xyxy
+        sims: torch.Tensor,        # [196] patch similarities (fallback)
+        H: int, W: int,
+    ) -> torch.Tensor:
+        """
+        Decode an object mask using the trained SpatialMaskHead.
+        
+        Flow: crop frame to bbox → resize 224×224 → backbone → [B,384,14,14]
+              → SpatialMaskHead → [B,1,256,256] → paste back to full frame.
+        
+        Falls back to _sims_to_mask if backbone or spatial head not available.
+        """
+        if not (self.use_spatial_head and self.backbone is not None):
+            return self._sims_to_mask(sims, H, W)
+
+        import torchvision.transforms.functional as TF
+
+        x1, y1, x2, y2 = bbox.tolist()
+        # Expand bbox by 15% for context (same as training)
+        bw = max(x2 - x1, 1.0)
+        bh = max(y2 - y1, 1.0)
+        pad = max(bw, bh) * 0.15
+        ex1 = max(0, int(x1 - pad))
+        ey1 = max(0, int(y1 - pad))
+        ex2 = min(W, int(x2 + pad))
+        ey2 = min(H, int(y2 + pad))
+        crop_w = max(ex2 - ex1, 1)
+        crop_h = max(ey2 - ey1, 1)
+
+        # Crop and resize to 224×224 (matching distillation training)
+        crop = frame[:, ey1:ey2, ex1:ex2]                              # [3, crop_h, crop_w]
+        crop_224 = F.interpolate(
+            crop.unsqueeze(0), size=(224, 224),
+            mode='bilinear', align_corners=False
+        ).to(self.device)                                               # [1, 3, 224, 224]
+
+        with torch.no_grad():
+            feat_map = self.backbone._extract_feature_map(crop_224)     # [1, 384, 14, 14]
+            logits = self.m2(feat_map)                                  # [1, 1, 256, 256]
+            probs = logits.sigmoid().squeeze()                          # [256, 256]
+
+        # Resize probability map to crop dimensions
+        crop_probs = F.interpolate(
+            probs.unsqueeze(0).unsqueeze(0),
+            size=(crop_h, crop_w),
+            mode='bilinear', align_corners=False
+        ).squeeze()                                                     # [crop_h, crop_w]
+
+        # Paste into full-frame mask
+        full_mask = torch.zeros(H, W, device=self.device, dtype=torch.bool)
+        full_mask[ey1:ey2, ex1:ex2] = (crop_probs > 0.5)
+        return full_mask
+
     # ── Feature extraction helpers ─────────────────────────────────
 
     def _sims_to_mask(
-        self, sims: torch.Tensor, H: int, W: int, threshold: float = 0.5
+        self, sims: torch.Tensor, H: int, W: int,
+        threshold: float = 0.5,
+        prev_bbox: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Convert 196 patch-level cosine similarities into a binary mask [H, W].
-        Uses adaptive thresholding relative to the max similarity.
+        Uses adaptive thresholding relative to the similarity range.
+        
+        If prev_bbox is provided, checks for mask inversion: when STGP drift
+        causes background patches to score higher than foreground, the mask
+        flips. We detect this by comparing predicted-FG overlap with the
+        previous bounding box and invert if necessary.
         """
         # Reshape to 14x14 spatial grid
         sim_map = sims.view(14, 14)
-        # Adaptive threshold: patches with sim > (max * threshold_ratio) are foreground
         max_sim = sim_map.max()
         min_sim = sim_map.min()
         adaptive_thresh = min_sim + (max_sim - min_sim) * threshold
-        binary_14 = (sim_map >= adaptive_thresh).float().unsqueeze(0).unsqueeze(0)  # [1,1,14,14]
+        binary_14 = (sim_map >= adaptive_thresh).float()
+
+        # ── Inversion detection using previous bounding box ─────────
+        if prev_bbox is not None:
+            x1, y1, x2, y2 = prev_bbox.tolist()
+            # Map bbox to 14×14 patch grid
+            px1 = max(0, int(x1 / W * 14))
+            py1 = max(0, int(y1 / H * 14))
+            px2 = min(14, int(x2 / W * 14) + 1)
+            py2 = min(14, int(y2 / H * 14) + 1)
+
+            bbox_mask = torch.zeros(14, 14, device=sims.device)
+            bbox_mask[py1:py2, px1:px2] = 1.0
+
+            fg_inside  = (binary_14 * bbox_mask).sum()
+            fg_outside = (binary_14 * (1.0 - bbox_mask)).sum()
+
+            # If more than 2× as many FG pixels are outside the bbox,
+            # the mask has inverted — flip it
+            if fg_outside > fg_inside * 2 and fg_inside > 0:
+                binary_14 = 1.0 - binary_14
+
+        binary_14 = binary_14.unsqueeze(0).unsqueeze(0)  # [1,1,14,14]
         # Upsample to full resolution with bilinear for smooth edges
         mask_full = F.interpolate(binary_14, size=(H, W), mode='bilinear', align_corners=False)
         return (mask_full.squeeze() > 0.5)
