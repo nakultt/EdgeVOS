@@ -11,7 +11,7 @@ import numpy as np
 
 # Internal modules
 from models.stgp import STGPGraph, STGPProjection
-from models.mask_head import MLPMaskHead
+from models.mask_head import MLPMaskHead, SpatialMaskHead
 from models.regrounding import RegroundingController
 
 
@@ -26,7 +26,7 @@ class EdgeVOSPipeline:
         self,
         sam3_model,         # SAM 3.1 teacher model (M1 grounding)
         dinov3_model,       # DINOv3 ViT-S (M3 feature extraction)
-        mask_head:          MLPMaskHead,
+        mask_head,          # MLPMaskHead or SpatialMaskHead
         stgp_projection:    STGPProjection,
         regrounding:        RegroundingController,
         cfg,                # OmegaConf config
@@ -40,6 +40,8 @@ class EdgeVOSPipeline:
         self.device  = device
         self.cfg     = cfg
         self.backbone = backbone
+        # Detect whether the mask head is spatial (conv decoder) vs MLP
+        self.use_spatial_head = isinstance(mask_head, SpatialMaskHead)
 
         # Build fresh STGP graph for each video
         self.graph = STGPGraph(
@@ -137,7 +139,7 @@ class EdgeVOSPipeline:
                     prev_area = max(1.0, (prev_bbox[2] - prev_bbox[0]) * (prev_bbox[3] - prev_bbox[1]))
                     new_area = max(1.0, (pred_bbox[2] - pred_bbox[0]) * (pred_bbox[3] - pred_bbox[1]))
                     ratio = new_area / prev_area
-                    if ratio > 1.5 or ratio < 0.5:
+                    if (ratio > 3.0 or ratio < 0.33) and prev_area > 1000:
                         needs_rg = True
                         trigger_reason = "secondary"
 
@@ -154,16 +156,8 @@ class EdgeVOSPipeline:
                     obj_id, frame, self._last_bboxes.get(obj_id), frame_t
                 )
                 if best_bbox is not None:
-                    expanded_bbox = self._expand_bbox(best_bbox, H, W)
-                    if self.backbone is not None:
-                        x1, y1, x2, y2 = expanded_bbox.tolist()
-                        norm_bbox = torch.tensor([[x1 / W, y1 / H, x2 / W, y2 / H]], dtype=torch.float32, device=self.device)
-                        roi_feat = self.backbone(frame.unsqueeze(0), norm_bbox).squeeze(0)
-                    else:
-                        roi_feat = self._extract_roi_feat(frame_patches, expanded_bbox, H, W)
-                    new_mask = self.m2.predict_mask(
-                        roi_feat.unsqueeze(0), (H, W), expanded_bbox.unsqueeze(0)
-                    ).squeeze()
+                    # Generate mask from DINOv3 patch similarities
+                    new_mask = self._sims_to_mask(sims, H, W)
                     feat_384 = self._extract_dinov3_feat(frame, new_mask)
                     self.graph.add_regrounding_node(
                         obj_id, feat_384, new_mask, frame_t, score
@@ -173,17 +167,8 @@ class EdgeVOSPipeline:
                 else:
                     results[obj_id] = None
             else:
-                # M2: Generate mask from predicted region
-                expanded_bbox = self._expand_bbox(pred_bbox, H, W)
-                if self.backbone is not None:
-                    x1, y1, x2, y2 = expanded_bbox.tolist()
-                    norm_bbox = torch.tensor([[x1 / W, y1 / H, x2 / W, y2 / H]], dtype=torch.float32, device=self.device)
-                    roi_feat = self.backbone(frame.unsqueeze(0), norm_bbox).squeeze(0)
-                else:
-                    roi_feat = self._extract_roi_feat(frame_patches, expanded_bbox, H, W)
-                mask = self.m2.predict_mask(
-                    roi_feat.unsqueeze(0), (H, W), expanded_bbox.unsqueeze(0)
-                ).squeeze()
+                # Generate mask from DINOv3 patch similarities (spatial)
+                mask = self._sims_to_mask(sims, H, W)
                 self._last_bboxes[obj_id] = pred_bbox
 
                 # Add keyframe node if applicable
@@ -198,6 +183,24 @@ class EdgeVOSPipeline:
         return results
 
     # ── Feature extraction helpers ─────────────────────────────────
+
+    def _sims_to_mask(
+        self, sims: torch.Tensor, H: int, W: int, threshold: float = 0.5
+    ) -> torch.Tensor:
+        """
+        Convert 196 patch-level cosine similarities into a binary mask [H, W].
+        Uses adaptive thresholding relative to the max similarity.
+        """
+        # Reshape to 14x14 spatial grid
+        sim_map = sims.view(14, 14)
+        # Adaptive threshold: patches with sim > (max * threshold_ratio) are foreground
+        max_sim = sim_map.max()
+        min_sim = sim_map.min()
+        adaptive_thresh = min_sim + (max_sim - min_sim) * threshold
+        binary_14 = (sim_map >= adaptive_thresh).float().unsqueeze(0).unsqueeze(0)  # [1,1,14,14]
+        # Upsample to full resolution with bilinear for smooth edges
+        mask_full = F.interpolate(binary_14, size=(H, W), mode='bilinear', align_corners=False)
+        return (mask_full.squeeze() > 0.5)
 
     def _extract_dinov3_patches(self, frame: torch.Tensor) -> torch.Tensor:
         """Extract 196 patch tokens [196, 384] from DINOv3 for a full frame."""

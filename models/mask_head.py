@@ -96,38 +96,72 @@ class MLPMaskHead(nn.Module):
 
 class SpatialMaskHead(nn.Module):
     """
-    Lightweight convolutional decoder for spatial feature maps.
-    Input:  [B, C, 14, 14]
-    Output: [B, 1, out_size, out_size] mask logits.
+    Progressive convolutional decoder for spatial feature maps.
+    
+    Architecture: 14×14 → 28×28 → 56×56 → 112×112 → 256×256
+    Each stage: upsample 2× → Conv3×3 + BN + GELU
+    
+    This interleaving of upsampling and convolutions preserves spatial
+    detail at every resolution, producing object-shaped masks instead
+    of rectangles.
+    
+    Input:  [B, C, 14, 14]   (C = 384 for RepViT-M1)
+    Output: [B, 1, out_size, out_size] mask logits
     """
 
     def __init__(self, in_channels: int = 384, out_size: int = 256):
         super().__init__()
         self.out_size = out_size
+
+        # Project from backbone channels to decoder width
         self.proj = nn.Sequential(
             nn.Conv2d(in_channels, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.GELU(),
         )
-        self.blocks = nn.Sequential(
+
+        # Stage 1: 14×14 → 28×28  (256 → 128 ch)
+        self.up1 = nn.Sequential(
             nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.GELU(),
+        )
+        # Stage 2: 28×28 → 56×56  (128 → 64 ch)
+        self.up2 = nn.Sequential(
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.GELU(),
+        )
+        # Stage 3: 56×56 → 112×112  (64 → 32 ch)
+        self.up3 = nn.Sequential(
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.GELU(),
-            nn.Conv2d(32, 1, kernel_size=1),
         )
+        # Final head: 1×1 conv to single-channel mask logits
+        self.head = nn.Conv2d(32, 1, kernel_size=1)
 
     def forward(self, feat_map: torch.Tensor) -> torch.Tensor:
-        x = self.proj(feat_map)
+        """
+        Args:
+            feat_map: [B, C, 14, 14] spatial features from backbone
+        Returns:
+            [B, 1, out_size, out_size] mask logits (apply sigmoid for probs)
+        """
+        x = self.proj(feat_map)                                       # [B, 256, 14, 14]
+
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = self.up1(x)                                               # [B, 128, 28, 28]
+
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        x = self.up2(x)                                               # [B, 64, 56, 56]
+
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
-        x = self.blocks(x)
+        x = self.up3(x)                                               # [B, 32, 112, 112]
+
+        x = self.head(x)                                              # [B, 1, 112, 112]
+
+        # Final resize to target output size (112 → 256)
         if x.shape[-2:] != (self.out_size, self.out_size):
             x = F.interpolate(
                 x, size=(self.out_size, self.out_size),

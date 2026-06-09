@@ -1,6 +1,10 @@
 """
-EdgeVOS — Month 1: Distillation Training Script
-Distill SAM 3.1 teacher → RepViT-M1 backbone + MLP mask head
+EdgeVOS — Month 1: Distillation Training Script (Spatial Mask Head)
+Distill SAM 3.1 teacher → RepViT-M1 backbone + SpatialMaskHead
+
+Key change from v1:  MLPMaskHead destroyed spatial info by pooling to [B,384].
+SpatialMaskHead keeps the [B,384,14,14] feature map and uses progressive
+convolutional upsampling (14→28→56→112→256) to decode object-shaped masks.
 
 Run:
   python train/distill_mask.py --config-name base
@@ -23,12 +27,17 @@ from tqdm import tqdm
 
 # Internal
 from models.backbone import BackboneWithRoI
-from models.mask_head import MLPMaskHead, distillation_loss, _dice_loss, _boundary_loss
+from models.mask_head import SpatialMaskHead, distillation_loss, _dice_loss, _boundary_loss
 from data.davis_dataset import COCODistillDataset
 
 
 class StudentModel(torch.nn.Module):
-    """RepViT-M1 image-to-mask student."""
+    """RepViT-M1 image-to-mask student with SPATIAL mask decoder.
+
+    Unlike v1 (MLPMaskHead), this version preserves the 14×14 spatial
+    feature map from the backbone and decodes it with convolutional
+    layers, so the model can learn object shapes instead of box blobs.
+    """
 
     def __init__(self, cfg):
         super().__init__()
@@ -36,25 +45,20 @@ class StudentModel(torch.nn.Module):
             model_name=cfg.model.backbone,
             pretrained=cfg.model.backbone_pretrained,
         )
-        self.mask_head = MLPMaskHead(
-            in_dim=self.backbone.feat_channels,
-            hidden_dims=cfg.model.mask_head_dims[1:],  # (512, 256)
-            out_size=cfg.model.mask_out_size,          # 256
+        # SpatialMaskHead: [B, 384, 14, 14] → [B, 1, 256, 256]
+        self.mask_head = SpatialMaskHead(
+            in_channels=self.backbone.feat_channels,   # 384
+            out_size=cfg.model.mask_out_size,           # 256
         )
 
     def forward(self, images: torch.Tensor, bboxes: torch.Tensor = None) -> torch.Tensor:
         """
-        images: [B, 3, 224, 224]
-        bboxes: [B, 4] normalized coords [x1, y1, x2, y2]. Default: centered crop.
+        images: [B, 3, 224, 224]  (already cropped to object region)
         Returns: [B, 1, 256, 256] mask logits
         """
-        B = images.shape[0]
-        if bboxes is None:
-            # Full crop region for distillation (images are already cropped to object)
-            bboxes = torch.tensor([[0.0, 0.0, 1.0, 1.0]] * B, device=images.device)
-            
-        roi_feat = self.backbone(images, bboxes)  # [B, 384]
-        return self.mask_head(roi_feat)           # [B, 1, 256, 256]
+        # Extract the 14×14 spatial feature map — NO pooling, NO RoI
+        feat_map = self.backbone._extract_feature_map(images)  # [B, 384, 14, 14]
+        return self.mask_head(feat_map)                         # [B, 1, 256, 256]
 
 
 def compute_iou(mask1: torch.Tensor, mask2: torch.Tensor) -> float:
@@ -68,6 +72,10 @@ def compute_iou(mask1: torch.Tensor, mask2: torch.Tensor) -> float:
 @hydra.main(config_path="../configs", config_name="base", version_base=None)
 def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
+    print("\n" + "="*60)
+    print("  SPATIAL MASK HEAD TRAINING (v2)")
+    print("  Architecture: [B,384,14,14] → Conv decoder → [B,1,256,256]")
+    print("="*60 + "\n")
 
     # ── Setup ──────────────────────────────────────────────────────
     torch.manual_seed(cfg.project.seed)
@@ -78,13 +86,13 @@ def main(cfg: DictConfig) -> None:
             project = cfg.wandb.project,
             entity  = cfg.wandb.entity,
             config  = OmegaConf.to_container(cfg, resolve=True),
-            name    = "distill_mask_repvit_m1",
+            name    = "distill_spatial_v2",
         )
     else:
         wandb.init(
             project = cfg.wandb.project,
             config  = OmegaConf.to_container(cfg, resolve=True),
-            name    = "distill_mask_repvit_m1",
+            name    = "distill_spatial_v2",
             mode    = "offline"
         )
 
@@ -120,6 +128,15 @@ def main(cfg: DictConfig) -> None:
 
     # ── Model + Optimiser ──────────────────────────────────────────
     model = StudentModel(cfg).to(device)
+    
+    # Log parameter counts
+    total_params = sum(p.numel() for p in model.parameters())
+    head_params = sum(p.numel() for p in model.mask_head.parameters())
+    backbone_params = sum(p.numel() for p in model.backbone.parameters())
+    print(f"Total params:    {total_params:,}")
+    print(f"Backbone params: {backbone_params:,}")
+    print(f"Mask head params: {head_params:,}")
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr           = cfg.distill.lr,
@@ -232,6 +249,7 @@ def main(cfg: DictConfig) -> None:
         # Validation Loop
         model.eval()
         val_iou_sum = 0.0
+        val_count = 0
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device)
@@ -242,8 +260,9 @@ def main(cfg: DictConfig) -> None:
                 student_masks = pred_logits.sigmoid() > 0.5
                 
                 val_iou_sum += compute_iou(student_masks, teacher_masks) * images.size(0)
+                val_count += images.size(0)
                 
-        val_iou = val_iou_sum / len(val_dataset)
+        val_iou = val_iou_sum / max(val_count, 1)
         vs_teacher = val_iou # Since the target IS the teacher mask, IoU == vs_teacher ratio
         
         print(f"Epoch {epoch+1} | Train Loss: {avg_loss:.4f} | Val IoU: {val_iou:.4f} | vs Teacher: {vs_teacher:.4f}")
@@ -262,6 +281,7 @@ def main(cfg: DictConfig) -> None:
                 "optimizer":  optimizer.state_dict(),
                 "val_iou":    val_iou,
                 "cfg":        OmegaConf.to_container(cfg),
+                "mask_head_type": "SpatialMaskHead",  # Track which head was used
             }, "checkpoints/best_distill.pt")
             print(f"  Saved best checkpoint (Val IoU={val_iou:.4f})")
         else:
@@ -282,6 +302,8 @@ def main(cfg: DictConfig) -> None:
     print("="*50 + "\n")
     
     print("\nDistillation training complete.")
+    print(f"Best Val IoU: {best_iou:.4f}")
+    print(f"Checkpoint: checkpoints/best_distill.pt (mask_head_type=SpatialMaskHead)")
 
 
 if __name__ == "__main__":
