@@ -23,6 +23,28 @@ from typing import List, Optional, Tuple
 import timm
 
 
+def _adaptive_pool_matrix(in_size: int, out_size: int) -> torch.Tensor:
+    """[out, in] matrix whose rows average the bins nn.AdaptiveAvgPool uses."""
+    m = torch.zeros(out_size, in_size)
+    for i in range(out_size):
+        start = (i * in_size) // out_size
+        end = -((-(i + 1) * in_size) // out_size)  # ceil
+        m[i, start:end] = 1.0 / (end - start)
+    return m
+
+
+def adaptive_avg_pool2d_exportable(x: torch.Tensor, out_size: int) -> torch.Tensor:
+    """
+    Numerically identical to ``F.adaptive_avg_pool2d(x, out_size)``, written as
+    two constant matmuls so it exports to ONNX / CoreML / TFLite even when the
+    output size is not a divisor of the input size (e.g. RepViT's 7×7 → 14×14).
+    """
+    h, w = x.shape[-2:]
+    ph = _adaptive_pool_matrix(int(h), out_size).to(x)
+    pw = _adaptive_pool_matrix(int(w), out_size).to(x)
+    return ph @ x @ pw.T
+
+
 class BackboneWithRoI(nn.Module):
     """
     Student backbone for EdgeVOS.
@@ -77,7 +99,9 @@ class BackboneWithRoI(nn.Module):
             features_only=True,
         )
 
-        # Adaptive pool to a fixed 14×14 grid regardless of input resolution.
+        # Pool/resample to a fixed 14×14 grid regardless of input resolution.
+        # At 224×224 RepViT's last stage is 7×7, so this *upsamples*; see
+        # adaptive_avg_pool2d_exportable for why it is not nn.AdaptiveAvgPool2d.
         self.adapt_pool = nn.AdaptiveAvgPool2d(grid_size)
 
         # Resolve actual channel dim from the backbone's feature_info
@@ -113,7 +137,7 @@ class BackboneWithRoI(nn.Module):
         """
         feats: List[torch.Tensor] = self.backbone(images)
         last_feat = feats[-1]  # highest-level feature map
-        return self.adapt_pool(last_feat)  # [B, C, 14, 14]
+        return adaptive_avg_pool2d_exportable(last_feat, self.grid_size)  # [B, C, 14, 14]
 
     # ── Public API ──────────────────────────────────────────────────
 
