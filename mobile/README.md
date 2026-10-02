@@ -51,8 +51,26 @@ The tokenizer is `mobile/tokenizer.py`, a CLIP BPE port with the vocabulary in `
 - **Fixed shapes for NPUs:** image inputs have dynamic `H`/`W`. NPU execution providers want static shapes, so fix them per session with free-dimension overrides, e.g. `SessionOptions.addFreeDimensionOverrideByName("H", 256)`. For the common 16:9 landscape case that's 256×448 (DINOv3) and 576×1024 (grounding); create a second session for portrait.
 - **Threading:** disable intra-op spinning (`session.intra_op.allow_spinning = 0`). The models run back to back with other work in between, and spinning threads made DINOv3 4× slower on CPU in testing.
 
-## 5. Measured so far (desktop CPU stand-in)
+## 5. Measured on a phone: Galaxy S24 (Snapdragon 8 Gen 3, SM8650, Android 16)
 
-On a laptop CPU (ONNX Runtime CPU EP, no GPU): ~125 ms per tracked frame (DINOv3 72 ms, segmenter 26 ms, glue ~27 ms).
-Per-frame compute is ~24 GFLOPs (DINOv3 19.5 + segmenter 3.4 + kNN ~1.5), and grounding is ~142 GFLOPs per call.
-Real phone numbers need a device: see issue #21.
+Reproduce with `bash mobile/android_bench/run.sh` (adb + Android NDK). The script removes everything it puts on the device.
+
+| Model | Phone CPU (ORT CPU EP, 4 threads) | **Hexagon NPU (QNN EP, fp16)** | Runs |
+|---|---|---|---|
+| `dinov3_patches` 256×448 | 196 ms (INT8: 86 ms) | **9.2 ms** | every frame |
+| `segmenter` (distilled RepViT) | 29 ms | **1.5 ms** | every frame + grounding |
+| `clip_dense` 576×1024 | 1,606 ms | **50 ms** | scene cuts / re-acquisition |
+| `clip_text` (INT8) | 15 ms | (CPU) | once per prompt |
+
+- **Per-frame model time on the NPU is ~11 ms**, about 90 fps of model budget before app glue. Grounding at a scene cut costs ~50 ms plus 3 segmenter passes.
+- **All three vision models run 100% on the NPU:** session creation succeeds with `session.disable_cpu_ep_fallback = 1`.
+- **NPU fp16 matches CPU fp32 on real frames:** segmenter mask IoU 0.989–0.994, DINOv3 patch cosine 0.998 mean, CLIP dense cosine 0.992 mean.
+- **Sustained load:** 3,000 consecutive DINOv3 runs averaged 9.5 ms vs 9.2 ms best, so no thermal throttling within ~30 s (chip 51 → 70 °C).
+- **Startup:** the first NPU load compiles the graph (segmenter 1.6 s, DINOv3 4.3 s, CLIP 30 s). Save the compiled context (`ep.context_enable=1`, `ep.context_embed_mode=1`) on first launch and load `*_qnn_ctx.onnx` afterwards: **0.2–0.5 s** per model. Context binaries are SoC-specific, so generate them on device or ship one per Hexagon version.
+- **NPU-ready bundle (cached fp16 contexts):** segmenter 13 MB + DINOv3 46 MB + CLIP 86 MB + text INT8 61 MB ≈ **206 MB**.
+
+**Android setup that was measured:**
+- **Libraries:** `com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0` + `com.qualcomm.qti:qnn-runtime:2.42.0` (`libQnnHtp.so`, `libQnnHtpV75Stub/Skel.so`, `libQnnSystem.so`).
+- **QNN EP options:** `backend_path=libQnnHtp.so`, `htp_performance_mode=burst`, `enable_htp_fp16_precision=1`.
+- **Shapes:** free-dimension overrides `H`/`W` per orientation.
+- **CPU fallback:** use the CPU EP; XNNPACK was slower here (DINOv3 INT8 147 ms vs 86 ms).
