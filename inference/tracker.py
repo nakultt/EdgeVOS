@@ -30,10 +30,10 @@ import torch.nn.functional as F
 from models.grounding import Detection
 
 DEFAULT_TRACKER_CFG = dict(
-    dino_long_side=448,        # DINOv3 input long side (multiple of 16)
+    dino_long_side=448,        # DINOv3 input long side (multiple of 16); 384 → −0.04 IoU, 320 → −0.14
     knn=5,                     # top-k neighbours for fg/bg patch scoring
-    max_fg_bank=1500,          # patch features kept per memory slot
-    max_bg_bank=3000,
+    max_fg_bank=500,           # patch features kept per memory slot (1500/3000 gave no gain,
+    max_bg_bank=1000,          # at 3x the kNN cost: 4.6 → 1.5 GFLOPs/frame)
     recent_keyframes=4,        # FIFO keyframes in addition to the anchor
     keyframe_interval=5,       # try to add memory every K frames (if confident)
     keyframe_min_conf=0.08,    # fg/bg margin required to write memory

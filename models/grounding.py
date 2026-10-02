@@ -87,6 +87,9 @@ class CLIPGrounder:
     """
 
     provides_masks = False
+    # Grounding input long side. Mask IoU vs SAM 3 on b.mp4 (88 frames):
+    # 512 → 0.53, 640 → 0.69, 768 → 0.75, 896 → 0.78, 1024 → 0.79. Runs only at
+    # scene cuts / re-acquisition, so accuracy wins over the extra compute.
     BACKGROUND_PROMPTS = ("background", "wall", "floor", "ground", "grass", "sky",
                           "furniture", "stairs", "a plant", "a building")
 
