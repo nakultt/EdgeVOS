@@ -1,0 +1,5 @@
+# Runtime deps of the on-device reference pipeline (no PyTorch)
+onnxruntime>=1.18
+numpy>=1.26
+opencv-python>=4.10
+regex  # optional: exact Unicode handling in the tokenizer
