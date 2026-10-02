@@ -31,7 +31,8 @@ dist/
 annotations_trainval2017.zip
 DAVIS/
 outputs
-wandb.venv/
+wandb
+.venv/
 
 # Generated tracking videos
 tracked*.mp4
