@@ -157,6 +157,10 @@ adb shell am start -n com.edgevos.app/.MainActivity
 adb logcat -s EdgeVOS                              # startup time, backend per model, per-frame stages
 ```
 
+For speed, build the release variant instead (signed with the debug key, so it installs over the debug APK and
+keeps the compiled NPU cache): `./gradlew :app:assembleRelease` → `app/build/outputs/apk/release/app-release.apk`.
+A prebuilt release APK is attached to the GitHub release `android-v1.0`.
+
 ### On-device parity
 
 `ParityActivity` runs the tracker (NPU sessions, landscape shapes) on a video's frames. It writes the same
@@ -173,14 +177,53 @@ python android/tools/parity_compare.py parity/py_cat parity/device_cat
 ```
 
 `--es video <mp4 on the phone>` decodes on the phone instead. Its YUV→RGB differs slightly from ffmpeg's.
-Repeat with `--es prompt car`, which must stay absent on every frame.
+Repeat with `--es prompt car`, which must stay absent on every frame. Force-stop the app between runs
+(`adb shell am force-stop com.edgevos.app`): a second `am start` into a running `ParityActivity` is ignored.
+`--ez cpu true` runs every model on the CPU EP (fp32 DINOv3, like the Python reference).
 
-### Expected and measured speed
+### Measured on a Galaxy S24 (SM-S921E, Snapdragon 8 Gen 3, Android 16)
 
-The models are measured on a Galaxy S24 NPU (`mobile/README.md`): DINOv3 9.2 ms and segmenter 1.5 ms per frame,
-CLIP grounding 50 ms at scene cuts. On the desktop JVM at 852×480, scoring takes 3.5 ms and the rest of the
-Kotlin glue around the models (resizes, masks, components) about 9 ms. At the app's 360×640 frames the glue is
-smaller. Adding an estimated ~5 ms for YUV conversion budgets roughly 30 fps end to end on the NPU. That is an estimate, not a measurement; the target is ≥ 15 fps.
+All three vision models run on the Hexagon NPU (`backend NPU (dino=NPU seg=NPU clip=NPU text=CPU)`).
 
-**On-device measurements are pending.** They need the phone: fps, per-stage ms, first- and second-launch
-startup, and parity vs Python. See the checklist in the app PR.
+**Startup** (`startup:` line in `adb logcat -s EdgeVOS`):
+
+| Launch | Time | Breakdown |
+|---|---|---|
+| First (clean install) | **88.8 s** | model copy 1.3 s; one-time NPU compile: segmenter 4.0 s, DINOv3 448×256 8.8 s, CLIP 1024×576 73.5 s |
+| Second and later | **1.8 s** | cached contexts: segmenter 0.19 s, DINOv3 0.10 s, CLIP 0.18 s, text encoder (CPU) 0.19 s |
+
+The parity video's landscape shapes compile lazily on its first run (about 35 s).
+
+**Live camera, release build** (360×640 frames, mean per-stage ms from logcat):
+
+| Frame type | Total | YUV→RGB | DINOv3 | Scoring | Segmenter | CLIP | fps |
+|---|---|---|---|---|---|---|---|
+| Tracked | **37 ms** | 3.9 | 11.2 | 8.5 | 2.5 | – | **27–30** |
+| Absent (grounding retries) | 47 ms | 5.0 | 11.6 | – | – | 53 on retry frames | – |
+| Re-ground (scene cut) | 150 ms | 4.6 | 11.8 | 11.3 | 17.2 (3 passes) | 52.7 | – |
+| First frame of a prompt | 150 ms | 10.4 | 13.2 | – | 7.2 | 53.8 + text 30.5 | – |
+
+**Use a release build to measure speed.** The debug APK is debuggable, so ART runs the Kotlin code much slower:
+tracked frames take 81 ms there (about 12 fps), with YUV→RGB at 25 ms and the Kotlin glue at about 26 ms. The model
+times are the same in both builds.
+
+### On-device parity results
+
+NPU (fp16) on the phone vs `mobile/runtime.py` (ORT 1.29.0, CPU fp32), b.mp4 852×480 rgb24 frames:
+
+| Prompt | Mean mask IoU | Events | Speed |
+|---|---|---|---|
+| `car` | **1.0000**: absent on all 944 frames | identical | 34.6 ms/frame |
+| `cat` | **0.9554** (0.9708 outside frames 841–855) | one difference: at the 841 scene cut the NPU run confirms the cat; Python marks it `absent` and re-acquires at 856 (`reground:absent`). The other five scene cuts (126, 288, 412, 503, 708) match. | ~54 ms/frame |
+
+Frames 841–855 have IoU 0 because one run has a mask and the other doesn't. Both runs settle on the same region
+(the cat plus the toy dog next to it), and from 860 on they agree again (IoU 0.95–0.98). Outside that window no
+frame is bit-identical, and a few short stretches (86–89, 105–121, 412–417) drop below 0.9. This is the
+sensitivity described above: a slightly different grounding box changes the refined mask. The NPU computes in fp16
+(segmenter mask IoU 0.989–0.994 vs CPU, CLIP cosine 0.992, `mobile/README.md`), and frame 841 is a borderline
+grounding decision. `parity_compare.py` reports FAIL for `cat` because the events differ.
+`ParityActivity --ez cpu true` runs every model on the CPU (fp32 DINOv3) to separate the NPU's effect from the port.
+
+**Windows (Git Bash):** prefix the `adb push` / `adb shell am start` commands with `MSYS_NO_PATHCONV=1`, otherwise
+Git Bash rewrites `/sdcard/...` into a Windows path. Also write `local.properties` with doubled backslashes
+(`sdk.dir=C\:\\Users\\...`); single backslashes are escape characters in a properties file.

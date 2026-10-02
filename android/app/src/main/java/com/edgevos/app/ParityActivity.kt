@@ -14,6 +14,7 @@ import com.edgevos.core.fromRgb
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
@@ -27,7 +28,8 @@ import kotlin.concurrent.thread
  *
  * `raw` is rgb24 from `ffmpeg -i b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb`: byte-identical to the frames
  * the Python reference sees. `video` decodes on the phone (MediaMetadataRetriever), whose YUV→RGB
- * differs slightly from ffmpeg. Optional: --ei frames N, --es name <output dir name>.
+ * differs slightly from ffmpeg. Optional: --ei frames N, --es name <output dir name>, --ez cpu true
+ * (every model on the CPU EP with fp32 DINOv3, like the Python reference: isolates the NPU's fp16 effect).
  */
 class ParityActivity : ComponentActivity() {
     private lateinit var log: TextView
@@ -42,12 +44,17 @@ class ParityActivity : ComponentActivity() {
         val raw = intent.getStringExtra("raw")
         val video = intent.getStringExtra("video")
         val limit = intent.getIntExtra("frames", Int.MAX_VALUE)
+        val useNpu = !intent.getBooleanExtra("cpu", false)
         val name = intent.getStringExtra("name") ?: prompt
         val out = File(getExternalFilesDir(null), "parity/$name").apply { mkdirs() }
 
+        if (!running.compareAndSet(false, true)) {
+            say("a parity run is already in progress; not starting another")
+            return
+        }
         thread(name = "parity") {
             try {
-                Engine.load(this) { say(it) }
+                Engine.load(this, useNpu) { say(it) }
                 say("models ready in ${Engine.startupMs} ms on ${Engine.backendLabel}")
                 val source = when {
                     raw != null -> rawFrames(File(raw), intent.getIntExtra("width", 852), intent.getIntExtra("height", 480))
@@ -58,6 +65,8 @@ class ParityActivity : ComponentActivity() {
             } catch (e: Throwable) {
                 Log.e(TAG, "parity failed", e)
                 say("FAILED: $e")
+            } finally {
+                running.set(false)
             }
         }
     }
@@ -134,5 +143,8 @@ class ParityActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "EdgeVOS-Parity"
+
+        /** One run per process: a recreated activity must not start a second run into the same files. */
+        private val running = AtomicBoolean(false)
     }
 }

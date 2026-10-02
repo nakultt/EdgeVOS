@@ -18,6 +18,9 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * The first QNN load of a model+shape compiles the graph (CLIP ~30 s, DINOv3 ~4 s, segmenter ~1.6 s)
  * and dumps `<model>_<H>x<W>_qnn_ctx.onnx`; later launches load that in 0.2–0.5 s.
+ *
+ * With [useNpu] = false every model runs on the CPU EP, with fp32 DINOv3 like the Python reference
+ * (parity runs that isolate the NPU's fp16 effect).
  */
 class QnnSessions(
     context: Context,
@@ -29,7 +32,8 @@ class QnnSessions(
     private val backends = ConcurrentHashMap<String, String>()
     /** Context binaries are SoC- and build-specific: key the cache by both. */
     val ctxDir = File(context.filesDir, "qnn_ctx/${socModel()}-${appVersion(context)}").apply { mkdirs() }
-    private val cpu = CpuSessions(dir, manifest, threads = 4, int8Models = setOf("clip_text", "dinov3_patches"))
+    private val cpu = CpuSessions(dir, manifest, threads = 4, int8Models =
+        if (useNpu) setOf("clip_text", "dinov3_patches") else setOf("clip_text"))
 
     override fun backend(model: String) = backends[model] ?: "?"
 

@@ -46,7 +46,7 @@ object Engine {
     }
 
     @Synchronized
-    fun load(context: Context, progress: (String) -> Unit) {
+    fun load(context: Context, useNpu: Boolean = true, progress: (String) -> Unit) {
         if (models != null) return
         val t0 = System.nanoTime()
         // Let the QNN HTP stub find the V75 skel shipped in the APK's (extracted) native lib dir.
@@ -56,7 +56,7 @@ object Engine {
         val dir = ModelStore.resolve(context, progress)
         val manifest = Manifest.load(File(dir, "manifest.json"))
         val bg = File(dir, "clip_background.f32").let { if (it.exists()) it else File(dir, "clip_background.npy") }
-        val sessions = QnnSessions(context, dir, manifest)
+        val sessions = QnnSessions(context, dir, manifest, useNpu)
         val m = Models(manifest, sessions, Models.loadBackground(bg))
 
         // Create the portrait sessions the camera uses up front (compiles + caches them on first launch).
