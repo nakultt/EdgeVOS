@@ -7,6 +7,10 @@ after scene cuts and reports when it's gone.
 SAM 3 was used as the **teacher only**. The product path is small distilled and off-the-shelf models
 that run fully on-device, on the Hexagon NPU of a Snapdragon phone, at **27–30 fps**.
 
+<p align="center">
+  <img src="docs/images/demo.gif" width="640" alt="EdgeVOS tracking the prompt 'cat' through a video: the mask is green on grounded frames and red on tracked frames">
+</p>
+
 **Download the Android app:** [Releases → `android-v1.0`](https://github.com/nakultt/EdgeVOS/releases/tag/android-v1.0)
 (arm64, Android 10+). The NPU path needs a Snapdragon 8 Gen 3 (Hexagon V75), tested on a Galaxy S24. Other
 phones fall back to the CPU at a few fps (fallback not tested on non-Snapdragon phones).
@@ -28,6 +32,11 @@ M4  re-grounding     on scene cuts, sustained low confidence, absence, and perio
 3. **Re-grounding:** a scene cut, a run of low confidence, or a periodic check calls M1 again. Losing the
    object reports "absent" (no mask), and re-acquiring it has to be confirmed on two retries.
 
+![Six frames of samples/b.mp4 with the prompt "cat": grounded at frame 0, tracked at 80, re-grounded after a scene cut at 126, tracked at 350, absent at 845, re-acquired at 856](docs/images/tracking_frames.jpg)
+
+*`samples/b.mp4`, prompt "cat" (`python -m demos.quickstart`). Green: grounded from the text; red: tracked;
+no overlay: absent. At 856 the mask also covers the toy dog next to the cat (see Known limits).*
+
 ## Results
 
 | | |
@@ -38,6 +47,10 @@ M4  re-grounding     on scene cuts, sustained low confidence, absence, and perio
 | **Startup** | 89 s once after install (NPU compile), **1.8 s** afterwards |
 | **Per-model NPU time** | DINOv3 9.2 ms, segmenter 1.5 ms, CLIP 50 ms (at re-grounds only); 10–30× faster than the phone CPU |
 | **Port fidelity** | Kotlin vs Python on the CPU: mean IoU 1.0000, identical events; phone NPU (fp16) vs Python: 0.9554 |
+
+<p align="center">
+  <img src="docs/images/npu_vs_cpu.png" width="720" alt="Per-model latency on a Galaxy S24, NPU vs CPU: DINOv3 9.2 vs 196 ms, segmenter 1.5 vs 29 ms, CLIP grounding 50 vs 1606 ms">
+</p>
 
 Details: [`mobile/README.md`](mobile/README.md) (models, phone benchmark) and
 [`android/README.md`](android/README.md) (app, measurements, parity).
@@ -63,6 +76,7 @@ follow the 16-px patch grid in places.
 | [`android/`](android) | Android app (`app/`), Kotlin port of the runtime (`core/`), parity tools (`tools/`) |
 | [`demos/`](demos) | runnable examples |
 | [`samples/`](samples) | sample clips (`b.mp4` is the reference clip for all quality and parity numbers) |
+| [`docs/images/`](docs/images) | README figures |
 | `sam3/` | SAM 3 submodule, teacher and offline reference only |
 
 ## Setup (Python)
