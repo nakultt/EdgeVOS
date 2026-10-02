@@ -26,7 +26,7 @@ import kotlin.concurrent.thread
  *   adb shell am start -n com.edgevos.app/.ParityActivity --es prompt cat \
  *       --es video /sdcard/Android/data/com.edgevos.app/files/b.mp4
  *
- * `raw` is rgb24 from `ffmpeg -i b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb`: byte-identical to the frames
+ * `raw` is rgb24 from `ffmpeg -i samples/b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb`: byte-identical to the frames
  * the Python reference sees. `video` decodes on the phone (MediaMetadataRetriever), whose YUV→RGB
  * differs slightly from ffmpeg. Optional: --ei frames N, --es name <output dir name>, --ez cpu true
  * (every model on the CPU EP with fp32 DINOv3, like the Python reference: isolates the NPU's fp16 effect).

@@ -36,7 +36,7 @@ tasks.test {
 }
 
 // JVM parity run against mobile/runtime.py:
-//   ./gradlew :core:parity --args="--video ../b.mp4 --prompt cat --out build/parity/kt_cat"
+//   ./gradlew :core:parity --args="--video ../samples/b.mp4 --prompt cat --out build/parity/kt_cat"
 tasks.register<JavaExec>("parity") {
     group = "verification"
     description = "Run the Kotlin tracker on a video with the ORT CPU EP and dump masks/events."

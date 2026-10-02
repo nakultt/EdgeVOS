@@ -1,7 +1,7 @@
 """
 Dump reference masks + events from mobile/runtime.py (the Python MobileTracker) for parity checks.
 
-    python android/tools/parity_reference.py --video b.mp4 --prompt cat --out parity/py_cat
+    python android/tools/parity_reference.py --video samples/b.mp4 --prompt cat --out parity/py_cat
 
 Frames are decoded with the ffmpeg CLI (rgb24) so the Kotlin runner (`:core:parity`), which
 uses the same command, sees byte-identical input. The model setup mirrors the app: fp32 vision

@@ -39,3 +39,20 @@ tracked*.mp4
 
 # Exported on-device models (python scripts/export_mobile.py)
 mobile/models/
+
+# Local outputs, logs and debug images
+*.log
+test_output*.jpg
+test_val_output*.jpg
+verify_output.png
+scripts/*.png
+last_user_inputs.txt
+tracked*.mp4
+live*.png
+
+# On-device parity artifacts (android/README.md)
+*.rgb
+parity/
+
+# Local model weights
+checkpoints/

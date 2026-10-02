@@ -1,3 +1,0 @@
-- distill.epochs=2
-- distill.batch_size=4
-- data.num_workers=2

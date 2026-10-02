@@ -1,7 +1,7 @@
 """
 Run the on-device pipeline (ONNX Runtime, no PyTorch) on a video file.
 
-    python -m mobile.demo --video b.mp4 --prompt cat --output tracked_mobile.mp4 [--int8]
+    python -m mobile.demo --video samples/b.mp4 --prompt cat --output tracked_mobile.mp4 [--int8]
 
 Needs exported models: python scripts/export_mobile.py --int8 --ort
 """

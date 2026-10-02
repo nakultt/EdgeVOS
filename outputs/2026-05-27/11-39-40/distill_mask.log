@@ -1,4 +1,0 @@
-[2026-05-27 11:39:59,772][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/repvit_m1.dist_in1k)
-[2026-05-27 11:40:00,109][httpx][INFO] - HTTP Request: HEAD https://huggingface.co/timm/repvit_m1.dist_in1k/resolve/main/model.safetensors "HTTP/1.1 302 Found"
-[2026-05-27 11:40:00,118][timm.models._hub][INFO] - [timm/repvit_m1.dist_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
-[2026-05-27 11:40:00,209][timm.models._builder][INFO] - Missing keys (head.head.l.weight, head.head.l.bias, head.head_dist.l.weight, head.head_dist.l.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
