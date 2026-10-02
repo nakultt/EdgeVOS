@@ -36,3 +36,6 @@ wandb
 
 # Generated tracking videos
 tracked*.mp4
+
+# Exported on-device models (python scripts/export_mobile.py)
+mobile/models/
