@@ -7,6 +7,9 @@ Frames are decoded with the ffmpeg CLI (rgb24) so the Kotlin runner (`:core:pari
 uses the same command, sees byte-identical input. The model setup mirrors the app: fp32 vision
 models and the INT8 text encoder (pass --fp32-text for the all-fp32 setup).
 
+Use the ONNX Runtime version the app ships (pip install -r android/tools/requirements.txt):
+the INT8 text encoder's output differs between ORT releases.
+
 Writes <out>/masks.bin (see android/tools/masks.py) and <out>/events.tsv (frame, event, ms).
 """
 
@@ -25,6 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from masks import MaskWriter  # noqa: E402
 from mobile import runtime  # noqa: E402
 from mobile.runtime import MobileTracker  # noqa: E402
+
+APP_ORT = "1.29.0"   # onnxruntime-android-qnn in android/app/build.gradle.kts
 
 
 def probe_size(video):
@@ -59,6 +64,8 @@ def main():
     ap.add_argument("--fp32-text", action="store_true")
     args = ap.parse_args()
 
+    if ort.__version__ != APP_ORT:
+        print(f"WARNING: onnxruntime {ort.__version__}, the app uses {APP_ORT}; INT8 text results will differ slightly")
     tracker = MobileTracker(args.models)
     if not args.fp32_text:   # the app runs the INT8 text encoder on the CPU
         so = ort.SessionOptions()

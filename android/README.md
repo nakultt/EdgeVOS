@@ -5,6 +5,7 @@ Text-prompted object segmentation and tracking, on-device. This is the Kotlin po
 
 | Module | What it is |
 |---|---|
+| `app/` | The Android app: CameraX preview, prompt box, mask overlay, HUD; QNN (Hexagon NPU) sessions with cached contexts; on-device parity mode. |
 | `core/` | Plain Kotlin/JVM library: CLIP tokenizer, OpenCV-equivalent image ops, `Grounder` / `PatchMemory` / `MobileTracker`, ONNX Runtime model wrapper. It has no Android dependencies, so it is unit-tested and parity-checked on the desktop JVM. |
 | `tools/` | Python helpers: reference dumps from `mobile/runtime.py`, mask comparison, test fixtures, scorer graph. |
 
@@ -52,25 +53,177 @@ components and grid fractions against golden values from Python (`tools/make_fix
 cd android && ./gradlew :core:test
 ```
 
-Parity: the same frames go through both trackers. Both decode b.mp4 with the ffmpeg CLI to rgb24.
-The model setup matches the app: fp32 vision models and the INT8 text encoder, on the ORT CPU EP.
+Parity: the same frames go through both trackers. Both decode the video with the ffmpeg CLI to rgb24.
+The model setup matches the app: fp32 vision models and the INT8 text encoder, on the ORT CPU EP. Run the
+Python reference on the app's ONNX Runtime version (1.29.0, `tools/requirements.txt`). The INT8 text
+encoder's output changes between ORT releases (1.29 vs 1.30: cosine 0.9989).
 
 ```bash
-pip install -r mobile/requirements.txt
+pip install -r android/tools/requirements.txt
 python android/tools/parity_reference.py --video b.mp4 --prompt cat --out parity/py_cat
 (cd android && ./gradlew :core:parity --args="--video ../b.mp4 --prompt cat --out ../parity/kt_cat")
 python android/tools/parity_compare.py parity/py_cat parity/kt_cat
 ```
 
-Results on `b.mp4` (944 frames, 852×480):
+Results, Kotlin on the JVM vs `mobile/runtime.py`, both on ORT 1.29.0:
 
-| Prompt | Mean mask IoU, Kotlin vs Python | Events |
-|---|---|---|
-| `cat` | **0.9995**: 929/929 frames with a mask in both, worst frame 0.90 (frames 503–508, just after a re-ground) | identical: `init`; `reground:scene_cut` at 126, 288, 412, 503, 708; cut at 841 → `absent` (841, 846, 851); `reground:absent` at 856 |
-| `car` | **1.0000**: absent on all 944 frames in both | identical: `absent` retries only |
+| Clip | Prompt | Mean mask IoU | Events |
+|---|---|---|---|
+| `b.mp4` (944 frames, 852×480) | `cat` | **1.0000**: 931/944 frames bit-identical, worst 0.99994 | identical: `init`; `reground:scene_cut` at 126, 288, 412, 503, 708; cut at 841 → `absent` (841, 846, 851); `reground:absent` at 856 |
+| `b.mp4` | `car` | **1.0000**: absent on all 944 frames in both | identical: `absent` retries only |
+| `b.mp4` centre 9:16 crop at 360×640 (400 frames, the app's frame size: DINOv3 448×256, CLIP 1024×576) | `cat` | **1.0000** | identical, including a `reground:low_confidence` at 156 |
 
 At 841 the scene cut is detected, but grounding doesn't confirm the cat, so the frame is `absent`. The
 re-acquisition is confirmed at 856. Python behaves the same with the fp32 text encoder.
 
+With the Python reference on ORT 1.30.0 instead, b.mp4 `cat` gives 0.9995 with identical events. Grounding is
+sensitive to small embedding changes. On one frame, a 1-px change in the grounding box changes the
+3× refined detection mask by tens of percent. Expect the NPU's fp16 to cause similar divergences on
+some clips.
+
 Speed on the desktop JVM (4-core Xeon, CPU EP): 143 ms per tracked frame (DINOv3 110, segmenter 20,
 scoring 3.5, Kotlin glue ~9). Python takes 185 ms per tracked frame on the same machine.
+
+## The app (`app/`)
+
+Full-screen back-camera preview, a text box and a Start/Stop button. Start grounds the prompt on the
+current frame, then tracks every frame. Submitting a different prompt restarts tracking. The mask is drawn
+at 50% opacity: green on (re-)grounded frames, red on tracked frames, nothing while the object is
+absent. The HUD shows fps, per-frame ms, the event (`init`, `reground:<reason>`, `track`, `absent`), the
+backend (`NPU` / `CPU`) and per-stage times. Every 30th frame and every event is also logged under the
+`EdgeVOS` logcat tag.
+
+**Frame path** (`MainActivity`, `YuvConverter`, `Engine`):
+- CameraX `ImageAnalysis` at 1280×720 16:9 with `STRATEGY_KEEP_ONLY_LATEST`, in `YUV_420_888`.
+- One pass converts to RGB (full-range BT.601), applies a 2×2 box downscale and rotates by `rotationDegrees`, giving a 360×640 upright portrait frame.
+- The tracker runs on the analysis thread, so frames that arrive while it is busy are dropped.
+- Model inputs are DINOv3 448×256 and CLIP 1024×576. These are the measured sizes.
+- The overlay maps the 360×640 mask with the same centre-crop as `PreviewView`'s `FILL_CENTER`, so it lines up with the preview. Preview and analysis share the 16:9 aspect.
+
+**Inference backend** (`QnnSessions`, `Engine`):
+- **Libraries:** `onnxruntime-android-qnn:1.29.0` and `qnn-runtime:2.42.0`.
+  - The APK keeps only `libQnnHtp.so`, `libQnnHtpV75Stub.so`, `libQnnHtpV75Skel.so`, `libQnnSystem.so` and `libQnnHtpPrepare.so`. The other Hexagon versions and the DSP/GPU backends are excluded in `app/build.gradle.kts`.
+  - `useLegacyPackaging` sets `extractNativeLibs=true`.
+  - `ADSP_LIBRARY_PATH` points the DSP loader at the extracted libraries.
+  - The manifest declares `libcdsprpc.so` as a `uses-native-library`.
+- **Vision models** (`dinov3_patches`, `segmenter`, `clip_dense`) run on the QNN EP:
+  - Options: `backend_path=libQnnHtp.so`, `htp_performance_mode=burst`, `enable_htp_fp16_precision=1`.
+  - `H`/`W` are fixed per session with free-dimension overrides.
+  - `session.disable_cpu_ep_fallback=1` makes a partly-placed graph fail outright instead of silently mixing NPU and CPU.
+- **Context cache:** the first QNN load of each model+shape compiles the graph and writes `filesDir/qnn_ctx/<SoC>-<versionCode>/<model>_<H>x<W>_<size>_qnn_ctx.onnx`. It uses `ep.context_enable=1` and `ep.context_embed_mode=1`. Later launches load the cached context.
+  - The first launch shows "Optimizing models for this phone…" while it compiles the portrait sessions (segmenter, DINOv3 448×256, CLIP 1024×576).
+  - Other shapes, such as landscape for the parity video, compile lazily on first use.
+- **CPU fallback:** if QNN fails for a model, that model runs on the ORT CPU EP (4 threads, DINOv3 INT8). The HUD then shows `CPU` (or `NPU+CPU`).
+- **Text encoder:** `clip_text.int8` always runs on the CPU, once per prompt.
+- **Patch scorer** (`scorer.onnx`): runs on the CPU.
+- **Spinning:** intra-op spinning is disabled everywhere.
+
+### Models on the phone
+
+**Chosen approach: bundled in the APK.** `app/build.gradle.kts` (`prepareModelAssets`) copies the six files
+the app uses into `assets/models/` uncompressed (`noCompress`):
+- `dinov3_patches.onnx` (NPU) and `dinov3_patches.int8.onnx` (CPU fallback)
+- `segmenter.onnx`
+- `clip_dense.onnx`
+- `clip_text.int8.onnx`
+- `manifest.json`
+
+It also writes `clip_background.npy` as a raw float32 file, `clip_background.f32`. On first launch the app copies these to
+`filesDir/models`, because ONNX Runtime and QNN need real files. The debug APK is about 406 MB, and one `adb install` gives a
+self-contained app.
+
+Alternative for faster iteration: build with `-PbundleModels=false` for a small APK, then push the
+models once. The app uses `<external files>/models` whenever `manifest.json` is there.
+
+```bash
+adb shell mkdir -p /sdcard/Android/data/com.edgevos.app/files/models
+adb push mobile/models/{manifest.json,dinov3_patches.onnx,dinov3_patches.int8.onnx,segmenter.onnx,clip_dense.onnx,clip_text.int8.onnx,clip_background.npy} \
+  /sdcard/Android/data/com.edgevos.app/files/models/
+```
+
+### Build
+
+Needs JDK 17+, Android SDK platform 36 and build-tools 36.0.0 (`sdkmanager "platforms;android-36"
+"build-tools;36.0.0" "platform-tools"`), and the models in `mobile/models/` (see above). No NDK: the app has no
+native code of its own.
+
+```bash
+cd android
+echo "sdk.dir=$ANDROID_HOME" > local.properties     # Windows: sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
+# → app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.edgevos.app/.MainActivity
+adb logcat -s EdgeVOS                              # startup time, backend per model, per-frame stages
+```
+
+For speed, build the release variant instead (signed with the debug key, so it installs over the debug APK and
+keeps the compiled NPU cache): `./gradlew :app:assembleRelease` → `app/build/outputs/apk/release/app-release.apk`.
+A prebuilt release APK is attached to the GitHub release `android-v1.0`.
+
+### On-device parity
+
+`ParityActivity` runs the tracker (NPU sessions, landscape shapes) on a video's frames. It writes the same
+`masks.bin` / `events.tsv` as the JVM and Python runs. Use raw rgb24 frames to give it byte-identical input:
+
+```bash
+ffmpeg -i b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb                      # 1.16 GB
+adb push b.rgb /sdcard/Android/data/com.edgevos.app/files/
+adb shell am start -n com.edgevos.app/.ParityActivity --es prompt cat \
+  --es raw /sdcard/Android/data/com.edgevos.app/files/b.rgb --ei width 852 --ei height 480
+adb logcat -s EdgeVOS-Parity                                           # wait for DONE
+adb pull /sdcard/Android/data/com.edgevos.app/files/parity/cat parity/device_cat
+python android/tools/parity_compare.py parity/py_cat parity/device_cat
+```
+
+`--es video <mp4 on the phone>` decodes on the phone instead. Its YUV→RGB differs slightly from ffmpeg's.
+Repeat with `--es prompt car`, which must stay absent on every frame. Force-stop the app between runs
+(`adb shell am force-stop com.edgevos.app`): a second `am start` into a running `ParityActivity` is ignored.
+`--ez cpu true` runs every model on the CPU EP (fp32 DINOv3, like the Python reference).
+
+### Measured on a Galaxy S24 (SM-S921E, Snapdragon 8 Gen 3, Android 16)
+
+All three vision models run on the Hexagon NPU (`backend NPU (dino=NPU seg=NPU clip=NPU text=CPU)`).
+
+**Startup** (`startup:` line in `adb logcat -s EdgeVOS`):
+
+| Launch | Time | Breakdown |
+|---|---|---|
+| First (clean install) | **88.8 s** | model copy 1.3 s; one-time NPU compile: segmenter 4.0 s, DINOv3 448×256 8.8 s, CLIP 1024×576 73.5 s |
+| Second and later | **1.8 s** | cached contexts: segmenter 0.19 s, DINOv3 0.10 s, CLIP 0.18 s, text encoder (CPU) 0.19 s |
+
+The parity video's landscape shapes compile lazily on its first run (about 35 s).
+
+**Live camera, release build** (360×640 frames, mean per-stage ms from logcat):
+
+| Frame type | Total | YUV→RGB | DINOv3 | Scoring | Segmenter | CLIP | fps |
+|---|---|---|---|---|---|---|---|
+| Tracked | **37 ms** | 3.9 | 11.2 | 8.5 | 2.5 | – | **27–30** |
+| Absent (grounding retries) | 47 ms | 5.0 | 11.6 | – | – | 53 on retry frames | – |
+| Re-ground (scene cut) | 150 ms | 4.6 | 11.8 | 11.3 | 17.2 (3 passes) | 52.7 | – |
+| First frame of a prompt | 150 ms | 10.4 | 13.2 | – | 7.2 | 53.8 + text 30.5 | – |
+
+**Use a release build to measure speed.** The debug APK is debuggable, so ART runs the Kotlin code much slower:
+tracked frames take 81 ms there (about 12 fps), with YUV→RGB at 25 ms and the Kotlin glue at about 26 ms. The model
+times are the same in both builds.
+
+### On-device parity results
+
+NPU (fp16) on the phone vs `mobile/runtime.py` (ORT 1.29.0, CPU fp32), b.mp4 852×480 rgb24 frames:
+
+| Prompt | Mean mask IoU | Events | Speed |
+|---|---|---|---|
+| `car` | **1.0000**: absent on all 944 frames | identical | 34.6 ms/frame |
+| `cat` | **0.9554** (0.9708 outside frames 841–855) | one difference: at the 841 scene cut the NPU run confirms the cat; Python marks it `absent` and re-acquires at 856 (`reground:absent`). The other five scene cuts (126, 288, 412, 503, 708) match. | ~54 ms/frame |
+
+Frames 841–855 have IoU 0 because one run has a mask and the other doesn't. Both runs settle on the same region
+(the cat plus the toy dog next to it), and from 860 on they agree again (IoU 0.95–0.98). Outside that window no
+frame is bit-identical, and a few short stretches (86–89, 105–121, 412–417) drop below 0.9. This is the
+sensitivity described above: a slightly different grounding box changes the refined mask. The NPU computes in fp16
+(segmenter mask IoU 0.989–0.994 vs CPU, CLIP cosine 0.992, `mobile/README.md`), and frame 841 is a borderline
+grounding decision. `parity_compare.py` reports FAIL for `cat` because the events differ.
+`ParityActivity --ez cpu true` runs every model on the CPU (fp32 DINOv3) to separate the NPU's effect from the port.
+
+**Windows (Git Bash):** prefix the `adb push` / `adb shell am start` commands with `MSYS_NO_PATHCONV=1`, otherwise
+Git Bash rewrites `/sdcard/...` into a Windows path. Also write `local.properties` with doubled backslashes
+(`sdk.dir=C\:\\Users\\...`); single backslashes are escape characters in a properties file.
