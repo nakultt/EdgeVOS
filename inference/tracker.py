@@ -48,6 +48,7 @@ DEFAULT_TRACKER_CFG = dict(
     cut_patch_frac=0.015,      # or: fraction of DINOv3 patches whose feature flips (cos < 0.5)
     min_det_appearance=-0.05,  # reject re-ground candidates that look unlike the memory
     mask_threshold=0.5,
+    box_refine_iters=3,        # mask-head re-crop iterations for box-only detections
 )
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -59,6 +60,14 @@ class FrameFeatures:
     feats: torch.Tensor   # [gh*gw, C] L2-normalised patch features
     gh: int
     gw: int
+
+
+def _box_iou(a: torch.Tensor, b: torch.Tensor) -> float:
+    ix = (torch.min(a[2], b[2]) - torch.max(a[0], b[0])).clamp(min=0)
+    iy = (torch.min(a[3], b[3]) - torch.max(a[1], b[1])).clamp(min=0)
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return float(inter / union.clamp(min=1e-6))
 
 
 class PatchMemory:
@@ -117,6 +126,7 @@ class EdgeVOSTracker:
         self.low_conf_count = 0
         self.last_reground_t = 0
         self.absent = False
+        self.pending_box: Optional[torch.Tensor] = None   # unconfirmed re-acquisition
         self.prev_thumb = None
         self.prev_feats: Optional[torch.Tensor] = None
         self.gray_diffs = deque(maxlen=30)
@@ -254,8 +264,20 @@ class EdgeVOSTracker:
                 return fallback
             self.absent = True
             self.low_conf_count = 0
+            self.pending_box = None
             self.last_event = "absent"
             return None
+        # Re-acquiring after absence with a box-only (CLIP) grounder: require the
+        # detection to repeat at the same place on the next retry, since single
+        # false hits are common for semantically close prompts.
+        acquiring = self.absent or self.memory.anchor_fg is None
+        if acquiring and det.box is not None and not getattr(self.grounder, "provides_masks", True):
+            pending, self.pending_box = self.pending_box, det.box
+            if pending is None or _box_iou(pending, det.box) < 0.3:
+                self.absent = True
+                self.last_event = "absent"
+                return None
+        self.pending_box = None
         mask = self._detection_mask(frame, det)
         first = self.memory.anchor_fg is None
         self._commit(ff, mask, anchor=first, keyframe=not first)
@@ -270,11 +292,12 @@ class EdgeVOSTracker:
             return None
         if not use_memory:
             return dets[0]
-        H, W = frame.shape[1:]
         score = self._patch_scores(ff.feats).view(ff.gh, ff.gw)
         best, best_val = None, -1e9
         for d in dets:
-            m = d.mask if d.mask is not None else self._box_mask(d.box, H, W)
+            # Judge appearance on the object mask, not a loose box full of background.
+            d.mask = self._detection_mask(frame, d)
+            m = d.mask
             grid = self._grid_fraction(m, ff) > 0.5
             appearance = float(score[grid].mean()) if grid.any() else -1.0
             if appearance < self.cfg["min_det_appearance"] and d.score < 0.6:
@@ -287,8 +310,19 @@ class EdgeVOSTracker:
     def _detection_mask(self, frame, det: Detection) -> torch.Tensor:
         if det.mask is not None and det.mask.any():
             return det.mask.bool()
+        # Box-only grounder: let the distilled mask head segment the object and
+        # re-crop on its own mask, so a coarse box converges to the tight
+        # object box the head was trained on.
         H, W = frame.shape[1:]
-        return (self._mask_head_probs(frame, det.box) > self.cfg["mask_threshold"]) & self._box_mask(det.box, H, W, pad=0.15)
+        box, mask = det.box, None
+        for _ in range(self.cfg["box_refine_iters"]):
+            m = (self._mask_head_probs(frame, box) > self.cfg["mask_threshold"]) & self._box_mask(box, H, W, pad=0.15)
+            if not m.any():
+                break
+            mask = m
+            ys, xs = torch.where(m)
+            box = torch.tensor([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], dtype=torch.float32, device=self.device)
+        return mask if mask is not None else self._box_mask(det.box, H, W)
 
     # ── Memory / state update ──────────────────────────────────────
 

@@ -11,6 +11,7 @@ import sys
 from typing import Optional, Union
 
 import numpy as np
+import open_clip
 import torch
 from transformers import AutoModel
 
@@ -19,19 +20,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.backbone import BackboneWithRoI
 from models.mask_head import SpatialMaskHead
-from models.regrounding import RegroundingController
 from models.grounding import SAM3Grounder, CLIPGrounder
 from inference.tracker import EdgeVOSTracker, DEFAULT_TRACKER_CFG
 
 
+# The CLIP grounder gives coarse, box-only detections, so trust the tracker
+# between scene cuts instead of periodically overwriting it.
+CLIP_TRACKER_CFG = {"reground_interval": 0, "reground_cooldown": 30}
+
+
 class EdgeVOSPredictor:
-    def __init__(self, checkpoint_path: str, device: str = None, use_sam3: bool = True,
+    def __init__(self, checkpoint_path: str, device: str = None, use_sam3: bool = False,
                  tracker_cfg: Optional[dict] = None):
         """
         Initialize the unified EdgeVOS model from a bundled checkpoint.
 
-        use_sam3:    ground text prompts with SAM 3 (accurate). Falls back to
-                     MobileCLIP2 dense window scoring if SAM 3 cannot be loaded.
+        The default (product) path is SAM-free: MobileCLIP2 dense grounding +
+        the SAM-distilled RepViT mask head + DINOv3 tracking.
+
+        use_sam3:    development only — ground with the SAM 3 teacher instead
+                     (needs the sam3 submodule and gated HF weights).
         tracker_cfg: overrides for ``inference.tracker.DEFAULT_TRACKER_CFG``.
         """
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,11 +76,10 @@ class EdgeVOSPredictor:
                 print(f"  SAM 3 unavailable ({type(e).__name__}: {e}); using MobileCLIP2 grounding.")
         if self.grounder is None:
             print("  Loading MobileCLIP2-S2 (text grounding)...")
-            rg = RegroundingController(model_name="MobileCLIP2-S2", pretrained="dfndr2b", device=self.device)
-            self.grounder = CLIPGrounder(rg.clip_model, rg.preprocess, rg.tokenizer, device=self.device)
-            # CLIP grounding costs seconds per call and gives no mask: re-ground
-            # only on scene cuts / sustained low confidence, not periodically.
-            tracker_cfg = {"reground_interval": 0, "reground_cooldown": 30, **(tracker_cfg or {})}
+            clip_model, _, preprocess = open_clip.create_model_and_transforms("MobileCLIP2-S2", pretrained="dfndr2b")
+            self.grounder = CLIPGrounder(clip_model.to(self.device).eval(), preprocess,
+                                         open_clip.get_tokenizer("MobileCLIP2-S2"), device=self.device)
+            tracker_cfg = {**CLIP_TRACKER_CFG, **(tracker_cfg or {})}
 
         self.tracker = EdgeVOSTracker(self.dinov3, self.backbone, self.mask_head, self.grounder,
                                       device=self.device, cfg=tracker_cfg)

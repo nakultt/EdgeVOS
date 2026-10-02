@@ -12,9 +12,9 @@ timm>=1.0.3                # RepViT-M1
 transformers>=4.44.0       # DINOv3 via HuggingFace
 open_clip_torch>=2.26.0    # MobileCLIP2-S2
 
-# SAM 3.1 - text grounding (M1). Vendored as the `sam3` git submodule:
-#   git submodule update --init sam3
-# EdgeVOS imports it from ./sam3 directly; these are its runtime deps.
+# SAM 3.1 - distillation teacher / offline reference only (not in the product).
+# Vendored as the `sam3` git submodule:  git submodule update --init sam3
+# Its runtime deps:
 ftfy==6.1.1
 regex
 iopath>=0.1.10
