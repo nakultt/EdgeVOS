@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "EdgeVOS"
 include(":core")
+include(":app")

@@ -1,0 +1,9 @@
+# Python reference for the Android parity checks (android/tools/*.py).
+# onnxruntime is pinned to the app's version (onnxruntime-android-qnn 1.29.0): the INT8 text
+# encoder's output changes between ORT releases (1.29 vs 1.30: cosine 0.9989), enough to move a
+# grounding box by a pixel.
+onnxruntime==1.29.0
+numpy>=1.26
+opencv-python>=4.10
+regex
+onnx  # make_scorer.py only

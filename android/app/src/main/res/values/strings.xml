@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EdgeVOS</string>
+    <string name="prompt_hint">Object to track, e.g. cat</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="optimizing">Optimizing models for this phone…\nThis happens once and takes about a minute.</string>
+    <string name="loading">Loading models…</string>
+    <string name="camera_denied">EdgeVOS needs the camera to track objects.</string>
+</resources>
