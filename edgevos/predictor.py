@@ -7,6 +7,7 @@ import numpy as np
 from transformers import AutoModel
 import sys
 import os
+from typing import Optional
 
 # Ensure project root is in path so internal imports work
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,15 +16,19 @@ from models.backbone import BackboneWithRoI
 from models.mask_head import SpatialMaskHead
 from models.stgp import STGPProjection
 from models.regrounding import RegroundingController
+from models.grounding import SAM3Grounder, CLIPGrounder
 from inference.pipeline import EdgeVOSPipeline
 
 # Fallback config
 from omegaconf import OmegaConf
 
 class EdgeVOSPredictor:
-    def __init__(self, checkpoint_path: str, device: str = None):
+    def __init__(self, checkpoint_path: str, device: str = None, use_sam3: bool = True):
         """
         Initialize the unified EdgeVOS model from a bundled checkpoint.
+
+        use_sam3: ground text prompts with SAM 3 (accurate). Falls back to
+                  MobileCLIP2 dense window scoring if SAM 3 cannot be loaded.
         """
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Loading EdgeVOS on {self.device}...")
@@ -63,6 +68,20 @@ class EdgeVOSPredictor:
             model_name="MobileCLIP2-S2", pretrained="dfndr2b", device=self.device
         )
         
+        # M1 text grounding
+        self.grounder = None
+        if use_sam3:
+            try:
+                print("  Loading SAM 3 (text grounding)...")
+                self.grounder = SAM3Grounder(device=self.device)
+            except Exception as e:
+                print(f"  SAM 3 unavailable ({type(e).__name__}: {e}); using MobileCLIP2 grounding.")
+        if self.grounder is None:
+            self.grounder = CLIPGrounder(
+                self.regrounding.clip_model, self.regrounding.preprocess,
+                self.regrounding.tokenizer, device=self.device,
+            )
+
         # 2. Distribute bundled weights to sub-models
         print("  Distributing weights...")
         bb_state = {k.replace("backbone.", "", 1): v for k, v in state_dict.items() if k.startswith("backbone.")}
@@ -107,60 +126,31 @@ class EdgeVOSPredictor:
         """Register the text prompt for tracking recovery."""
         self.regrounding.register_text_prompt(obj_id, text_prompt)
         
-    def init_from_text(self, frame_tensor: torch.Tensor, text_prompt: str, obj_id: int = 0) -> torch.Tensor:
+    def init_from_text(self, frame_tensor: torch.Tensor, text_prompt: str, obj_id: int = 0) -> Optional[torch.Tensor]:
         """
-        Scan frame 0 for the object matching the text prompt, generate initial mask, and initialize STGP.
-        Returns the initial mask tensor [H, W].
+        Ground the text prompt in the frame (M1), generate the initial mask and initialise STGP.
+        Returns the initial mask [H, W] (bool), or None if the object was not found.
         """
         self.set_text_prompt(text_prompt, obj_id)
-        
-        # Borrow the logic from our demo script to locate the bbox
-        import torch.nn.functional as F
-        from PIL import Image
-        
-        tokens = self.regrounding.tokenizer([text_prompt]).to(self.device)
-        with torch.no_grad(), torch.amp.autocast('cuda'):
-            text_feat = self.regrounding.clip_model.encode_text(tokens)
-            text_feat = F.normalize(text_feat, dim=-1)
-
         H, W = frame_tensor.shape[1], frame_tensor.shape[2]
-        crops, bboxes = [], []
-        
-        # Basic multi-scale crops
-        for r in range(2):
-            for c in range(2):
-                y1, y2 = int(r*H/2), int((r+1)*H/2)
-                x1, x2 = int(c*W/2), int((c+1)*W/2)
-                crops.append(frame_tensor[:, y1:y2, x1:x2])
-                bboxes.append([x1, y1, x2, y2])
-        crops.append(frame_tensor)
-        bboxes.append([0, 0, W, H])
 
-        scores = []
-        with torch.no_grad(), torch.amp.autocast('cuda'):
-            for crop in crops:
-                crop_np = crop.permute(1, 2, 0).cpu().numpy()
-                crop_pil = Image.fromarray((crop_np * 255).astype(np.uint8))
-                crop_input = self.regrounding.preprocess(crop_pil).unsqueeze(0).to(self.device)
-                img_feat = self.regrounding.clip_model.encode_image(crop_input)
-                img_feat = F.normalize(img_feat, dim=-1)
-                scores.append((text_feat @ img_feat.T).item())
+        dets = self.grounder.detect(frame_tensor, text_prompt)
+        if not dets:
+            return None
+        det = dets[0]
 
-        best_idx = np.argmax(scores)
-        best_bbox = torch.tensor(bboxes[best_idx], dtype=torch.float32, device=self.device)
-        
         # Reset pipeline state
         self.pipeline._frame_count = 0
-        self.pipeline._last_bboxes = {obj_id: best_bbox}
-        
-        # Decode initial mask
-        dummy_sims = torch.zeros(196, device=self.device) 
-        mask = self.pipeline._decode_mask(frame_tensor, best_bbox, dummy_sims, H, W)
-        
-        # Init graph
+        self.pipeline._last_bboxes = {obj_id: det.box}
+
+        if det.mask is not None:
+            mask = det.mask
+        else:
+            dummy_sims = torch.zeros(196, device=self.device)
+            mask = self.pipeline._decode_mask(frame_tensor, det.box, dummy_sims, H, W)
+
         feat_384 = self.pipeline._extract_dinov3_feat(frame_tensor, mask)
         self.pipeline.graph.init_object(obj_id, feat_384, mask, frame_t=0)
-        
         return mask
 
     def process_frame(self, frame_tensor: torch.Tensor, obj_id: int = 0) -> torch.Tensor:
