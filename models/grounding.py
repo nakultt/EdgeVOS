@@ -4,9 +4,9 @@ EdgeVOS — Module 1: Text Grounding (text prompt → candidate boxes + masks)
 Two interchangeable grounders:
 
   SAM3Grounder  — SAM 3 open-vocabulary detector/segmenter (the M1 teacher).
-                  Accurate; used at initialisation and for re-grounding.
-  CLIPGrounder  — MobileCLIP2-S2 dense multi-scale window scoring.
-                  Lightweight fallback when SAM 3 is not available.
+                  Offline / development reference only — not part of the product.
+  CLIPGrounder  — MobileCLIP2-S2 dense heatmap in one forward pass.
+                  SAM-free product path; boxes refined by the distilled mask head.
 
 Both return a list of ``Detection`` sorted by score (best first).
 """
@@ -35,6 +35,8 @@ class Detection:
 
 class SAM3Grounder:
     """Wraps ``sam3.Sam3Processor`` for single-image text grounding."""
+
+    provides_masks = True
 
     def __init__(self, device: str = "cuda", confidence_threshold: float = 0.3):
         if os.path.isdir(_SAM3_REPO) and _SAM3_REPO not in sys.path:
@@ -74,84 +76,85 @@ class SAM3Grounder:
 
 class CLIPGrounder:
     """
-    Dense multi-scale sliding-window localisation with MobileCLIP2-S2.
+    SAM-free text grounding with MobileCLIP2-S2 in one forward pass.
 
-    Windows are scored against the text embedding in GPU batches and turned
-    into a coverage-normalised heatmap; the box is the high-response region.
-    Coarser than SAM 3 (no mask, weak on small objects) but far tighter than
-    picking a single grid tile.
+    FastViT ends in global-average-pool → linear, so applying that linear
+    head at every location of the final feature map gives per-location CLIP
+    embeddings whose mean is exactly the image embedding. Scoring them against
+    the prompt (minus the best background prompt) yields a dense heatmap; each
+    peak region becomes a candidate box. Boxes are coarse (32-px grid) and are
+    tightened downstream by the distilled mask head.
     """
 
+    provides_masks = False
+    BACKGROUND_PROMPTS = ("background", "wall", "floor", "ground", "grass", "sky",
+                          "furniture", "stairs", "a plant", "a building")
+
     def __init__(self, clip_model, preprocess, tokenizer, device: str = "cuda",
-                 scales=(0.2, 0.3, 0.45, 0.65), stride_ratio: float = 0.5):
+                 long_side: int = 1024, presence_threshold: float = 0.14, max_candidates: int = 3):
         self.clip_model = clip_model
+        self.trunk = clip_model.visual.trunk
         self.tokenizer = tokenizer
         self.device = device
-        self.scales = scales
-        self.stride_ratio = stride_ratio
-        # Pull resize/normalisation constants out of the open_clip transform so
-        # crops can be batched on the GPU instead of going through PIL.
-        self.input_size = 256
-        self.mean = torch.tensor([0.0, 0.0, 0.0], device=device).view(1, 3, 1, 1)
-        self.std = torch.tensor([1.0, 1.0, 1.0], device=device).view(1, 3, 1, 1)
+        self.long_side = long_side
+        self.presence_threshold = presence_threshold
+        self.max_candidates = max_candidates
+        self.mean = torch.zeros(1, 3, 1, 1, device=device)
+        self.std = torch.ones(1, 3, 1, 1, device=device)
         for t in getattr(preprocess, "transforms", []):
-            if hasattr(t, "size") and not hasattr(t, "mean"):
-                s = t.size
-                self.input_size = s if isinstance(s, int) else s[0]
             if hasattr(t, "mean") and hasattr(t, "std"):
                 self.mean = torch.tensor(t.mean, device=device).view(1, 3, 1, 1)
                 self.std = torch.tensor(t.std, device=device).view(1, 3, 1, 1)
+        self._text_cache = {}
+        self._bg_feat = self._encode([f"a photo of {p}." for p in self.BACKGROUND_PROMPTS])
 
     @torch.no_grad()
-    def _text_feat(self, prompt: str) -> torch.Tensor:
-        tokens = self.tokenizer([f"a photo of a {prompt}"]).to(self.device)
-        with torch.autocast("cuda", enabled=self.device.startswith("cuda")):
-            return F.normalize(self.clip_model.encode_text(tokens).float(), dim=-1)
+    def _encode(self, texts: List[str]) -> torch.Tensor:
+        tokens = self.tokenizer(texts).to(self.device)
+        return F.normalize(self.clip_model.encode_text(tokens).float(), dim=-1)
 
-    def _windows(self, H: int, W: int) -> List[List[int]]:
-        boxes = []
-        side = min(H, W)
-        for s in self.scales:
-            for aspect in (1.0, 1.6):
-                bw = int(min(W, side * s * aspect ** 0.5))
-                bh = int(min(H, side * s / aspect ** 0.5))
-                sx = max(1, int(bw * self.stride_ratio))
-                sy = max(1, int(bh * self.stride_ratio))
-                for y in range(0, H - bh + 1, sy):
-                    for x in range(0, W - bw + 1, sx):
-                        boxes.append([x, y, x + bw, y + bh])
-        return boxes
+    def _text_feat(self, prompt: str) -> torch.Tensor:
+        if prompt not in self._text_cache:
+            self._text_cache[prompt] = self._encode([f"a photo of a {prompt}."])
+        return self._text_cache[prompt]
+
+    @torch.no_grad()
+    def heatmap(self, frame: torch.Tensor, prompt: str) -> torch.Tensor:
+        """Prompt-vs-background similarity margin on the feature grid → [h, w]."""
+        H, W = frame.shape[1:]
+        s = self.long_side / max(H, W)
+        th = max(32, int(round(H * s / 32)) * 32)
+        tw = max(32, int(round(W * s / 32)) * 32)
+        x = F.interpolate(frame[None].float().to(self.device), size=(th, tw), mode="bilinear", align_corners=False)
+        fmap = self.trunk.forward_features((x - self.mean) / self.std)            # [1, C, h, w]
+        dense = F.normalize(self.trunk.head.fc(fmap.permute(0, 2, 3, 1)).float(), dim=-1)[0]
+        sim = (dense @ self._text_feat(prompt).T)[..., 0]
+        bg = (dense @ self._bg_feat.T).max(-1).values
+        return sim - bg
 
     @torch.no_grad()
     def detect(self, frame: torch.Tensor, prompt: str) -> List[Detection]:
+        import cv2
+
         H, W = frame.shape[1:]
-        text_feat = self._text_feat(prompt)
-        boxes = self._windows(H, W)
-        frame = frame.to(self.device).unsqueeze(0)
+        hm = self.heatmap(frame, prompt)
+        if float(hm.max()) < self.presence_threshold:
+            return []
+        up = F.interpolate(hm[None, None], size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+        lo, hi = float(up.min()), float(up.max())
+        region = (up >= lo + 0.6 * (hi - lo)).cpu().numpy().astype(np.uint8)
+        n, labels = cv2.connectedComponents(region, connectivity=8)
+        labels_t = torch.from_numpy(labels).to(self.device)
 
-        scores = []
-        for i in range(0, len(boxes), 64):
-            crops = torch.cat([
-                F.interpolate(frame[:, :, y1:y2, x1:x2], size=(self.input_size, self.input_size),
-                              mode="bilinear", align_corners=False)
-                for x1, y1, x2, y2 in boxes[i:i + 64]
-            ])
-            crops = (crops - self.mean) / self.std
-            with torch.autocast("cuda", enabled=self.device.startswith("cuda")):
-                img_feat = F.normalize(self.clip_model.encode_image(crops).float(), dim=-1)
-            scores.append((img_feat @ text_feat.T).squeeze(1))
-        scores = torch.cat(scores)
-
-        # Coverage-normalised heatmap: each pixel averages the (sharpened) scores
-        # of the windows covering it, so context-heavy large windows don't win.
-        weights = torch.exp((scores - scores.max()) * 50.0).tolist()
-        heat = torch.zeros(H, W, device=self.device)
-        cover = torch.full((H, W), 1e-6, device=self.device)
-        for (x1, y1, x2, y2), w in zip(boxes, weights):
-            heat[y1:y2, x1:x2] += w
-            cover[y1:y2, x1:x2] += 1
-        heat = heat / cover
-        ys, xs = torch.where(heat >= 0.5 * heat.max())
-        box = torch.tensor([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1],
-                           dtype=torch.float32, device=self.device)
-        return [Detection(box=box, score=float(scores.max()), mask=None)]
+        dets = []
+        for k in range(1, n):
+            comp = labels_t == k
+            peak = float(up[comp].max())
+            if peak < self.presence_threshold:
+                continue
+            ys, xs = torch.where(comp)
+            box = torch.tensor([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1],
+                               dtype=torch.float32, device=self.device)
+            dets.append(Detection(box=box, score=peak, mask=None))
+        dets.sort(key=lambda d: d.score, reverse=True)
+        return dets[:self.max_candidates]

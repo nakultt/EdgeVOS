@@ -17,11 +17,11 @@ def main():
     parser.add_argument("--prompt", type=str, required=True, help="What object to track (e.g. 'car')")
     parser.add_argument("--output", type=str, default="tracked_output.mp4", help="Output video path")
     parser.add_argument("--ckpt", type=str, default="checkpoints/edgevos_spatial_v1.pt", help="Checkpoint path")
-    parser.add_argument("--no_sam3", action="store_true", help="Use MobileCLIP2 grounding instead of SAM 3")
+    parser.add_argument("--use_sam3", action="store_true", help="Dev only: ground with the SAM 3 teacher")
     args = parser.parse_args()
 
     # 1. Load the model
-    model = EdgeVOSPredictor(checkpoint_path=args.ckpt, use_sam3=not args.no_sam3)
+    model = EdgeVOSPredictor(checkpoint_path=args.ckpt, use_sam3=args.use_sam3)
 
     # 2. Open the video file
     video = cv2.VideoCapture(args.video_path)
