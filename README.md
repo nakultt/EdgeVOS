@@ -71,3 +71,16 @@ model.last_event                                                      # 'init' |
 ```
 
 `frame_to_tensor` accepts OpenCV BGR uint8 arrays (or RGB with `bgr=False`) and tensors. Tracker settings are in `inference/tracker.py` (`DEFAULT_TRACKER_CFG`) and can be overridden with `EdgeVOSPredictor(..., tracker_cfg={...})`.
+
+## On device
+
+The SAM-free pipeline exports to ONNX / ONNX Runtime Mobile and runs without PyTorch.
+See [mobile/README.md](mobile/README.md):
+
+```bash
+.venv/Scripts/python scripts/export_mobile.py --int8 --ort
+```
+
+```bash
+.venv/Scripts/python -m mobile.demo --video b.mp4 --prompt cat --int8
+```
