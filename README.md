@@ -44,5 +44,26 @@ DINOv3, MobileCLIP2-S2 and SAM 3 weights download from Hugging Face on first use
 ## Run
 
 ```bash
+.venv/Scripts/python a.py
+```
+
+Tracks `"cat"` in `b.mp4` and writes `tracked.mp4`. For any video and prompt:
+
+```bash
 .venv/Scripts/python demo_mp4.py --video_path b.mp4 --prompt "cat" --output tracked.mp4
 ```
+
+In the output, green frames were (re-)grounded by SAM 3, red frames were tracked by the lightweight tracker, and frames without an overlay are frames where the object is absent.
+
+## Python API
+
+```python
+from edgevos import EdgeVOSPredictor
+
+model = EdgeVOSPredictor("checkpoints/edgevos_spatial_v1.pt")        # use_sam3=False -> CLIP grounding
+mask = model.init_from_text(model.frame_to_tensor(frame_bgr), "cat")  # [H, W] bool, or None
+mask = model.process_frame(model.frame_to_tensor(next_frame_bgr))    # None while the object is absent
+model.last_event                                                      # 'init' | 'reground:<reason>' | 'absent' | None
+```
+
+`frame_to_tensor` accepts OpenCV BGR uint8 arrays (or RGB with `bgr=False`) and tensors. Tracker settings are in `inference/tracker.py` (`DEFAULT_TRACKER_CFG`) and can be overridden with `EdgeVOSPredictor(..., tracker_cfg={...})`.
