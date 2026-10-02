@@ -26,7 +26,7 @@ Normalisation, token slicing, L2-normalisation and the sigmoid are inside the gr
 ## 2. Check it on desktop, without PyTorch
 
 ```bash
-.venv/Scripts/python -m mobile.demo --video b.mp4 --prompt cat --int8
+.venv/Scripts/python -m mobile.demo --video samples/b.mp4 --prompt cat --int8
 ```
 
 ## 3. Per-frame pipeline (what the app implements)

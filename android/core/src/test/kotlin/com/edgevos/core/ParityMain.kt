@@ -8,7 +8,7 @@ import java.io.File
  * JVM parity run: the Kotlin tracker on a video with the ONNX Runtime CPU EP, frames decoded by the
  * ffmpeg CLI exactly like android/tools/parity_reference.py. Writes masks.bin + events.tsv.
  *
- *   ./gradlew :core:parity --args="--video ../b.mp4 --prompt cat --out build/parity/kt_cat"
+ *   ./gradlew :core:parity --args="--video ../samples/b.mp4 --prompt cat --out build/parity/kt_cat"
  */
 fun main(args: Array<String>) {
     val opts = args.toList().chunked(2).associate { (k, v) -> k.removePrefix("--") to v }

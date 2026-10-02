@@ -60,8 +60,8 @@ encoder's output changes between ORT releases (1.29 vs 1.30: cosine 0.9989).
 
 ```bash
 pip install -r android/tools/requirements.txt
-python android/tools/parity_reference.py --video b.mp4 --prompt cat --out parity/py_cat
-(cd android && ./gradlew :core:parity --args="--video ../b.mp4 --prompt cat --out ../parity/kt_cat")
+python android/tools/parity_reference.py --video samples/b.mp4 --prompt cat --out parity/py_cat
+(cd android && ./gradlew :core:parity --args="--video ../samples/b.mp4 --prompt cat --out ../parity/kt_cat")
 python android/tools/parity_compare.py parity/py_cat parity/kt_cat
 ```
 
@@ -167,7 +167,7 @@ A prebuilt release APK is attached to the GitHub release `android-v1.0`.
 `masks.bin` / `events.tsv` as the JVM and Python runs. Use raw rgb24 frames to give it byte-identical input:
 
 ```bash
-ffmpeg -i b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb                      # 1.16 GB
+ffmpeg -i samples/b.mp4 -f rawvideo -pix_fmt rgb24 b.rgb                      # 1.16 GB
 adb push b.rgb /sdcard/Android/data/com.edgevos.app/files/
 adb shell am start -n com.edgevos.app/.ParityActivity --es prompt cat \
   --es raw /sdcard/Android/data/com.edgevos.app/files/b.rgb --ei width 852 --ei height 480
