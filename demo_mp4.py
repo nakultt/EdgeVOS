@@ -8,8 +8,6 @@ Usage:
 
 import argparse
 import cv2
-import torch
-import numpy as np
 from tqdm import tqdm
 from edgevos import EdgeVOSPredictor
 
@@ -19,10 +17,11 @@ def main():
     parser.add_argument("--prompt", type=str, required=True, help="What object to track (e.g. 'car')")
     parser.add_argument("--output", type=str, default="tracked_output.mp4", help="Output video path")
     parser.add_argument("--ckpt", type=str, default="checkpoints/edgevos_spatial_v1.pt", help="Checkpoint path")
+    parser.add_argument("--no_sam3", action="store_true", help="Use MobileCLIP2 grounding instead of SAM 3")
     args = parser.parse_args()
 
     # 1. Load the model
-    model = EdgeVOSPredictor(checkpoint_path=args.ckpt)
+    model = EdgeVOSPredictor(checkpoint_path=args.ckpt, use_sam3=not args.no_sam3)
 
     # 2. Open the video file
     video = cv2.VideoCapture(args.video_path)
@@ -31,7 +30,7 @@ def main():
         return
 
     # Get video properties
-    fps = video.get(cv2.CAP_PROP_FPS)
+    fps = video.get(cv2.CAP_PROP_FPS) or 30
     width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -43,41 +42,29 @@ def main():
     print(f"\nProcessing {args.video_path} ({total_frames} frames at {fps} fps)")
     print(f"Tracking object: '{args.prompt}'")
 
-    # 3. Read Frame 0 and Initialize
+    # 3. Read frame 0 and initialise (frame_to_tensor: OpenCV BGR -> RGB tensor on device)
     ret, frame_bgr = video.read()
     if not ret:
         print("Error reading first frame.")
         return
+    mask = model.init_from_text(model.frame_to_tensor(frame_bgr), text_prompt=args.prompt)
+    if mask is None:
+        print(f"'{args.prompt}' not visible in the first frame; will keep searching.")
 
-    # Convert BGR (OpenCV) -> RGB -> PyTorch Tensor [3, H, W]
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).cuda().float() / 255.0
+    # 4. Track. Green = (re)grounded frame, red = tracked frame, no overlay = absent.
+    with tqdm(total=total_frames, desc="Tracking") as pbar:
+        while ret:
+            if mask is not None:
+                overlay = frame_bgr.copy()
+                grounded = (model.last_event or "").startswith(("init", "reground"))
+                overlay[mask.cpu().numpy()] = [0, 255, 0] if grounded else [0, 0, 255]
+                frame_bgr = cv2.addWeighted(overlay, 0.5, frame_bgr, 0.5, 0)
+            out_video.write(frame_bgr)
+            pbar.update(1)
 
-    mask = model.init_from_text(frame_tensor, text_prompt=args.prompt)
-    
-    # Draw initial mask on frame 0 (Green)
-    overlay = frame_bgr.copy()
-    overlay[mask.cpu().numpy()] = [0, 255, 0]
-    out_video.write(cv2.addWeighted(overlay, 0.5, frame_bgr, 0.5, 0))
-
-    # 4. Loop through the rest of the video
-    for _ in tqdm(range(1, total_frames), desc="Tracking"):
-        ret, frame_bgr = video.read()
-        if not ret: break
-
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).cuda().float() / 255.0
-
-        mask = model.process_frame(frame_tensor)
-
-        # Draw mask
-        if mask is not None:
-            mask_np = mask.cpu().numpy()
-            overlay = frame_bgr.copy()
-            overlay[mask_np] = [0, 0, 255] # Red for tracked frames
-            frame_bgr = cv2.addWeighted(overlay, 0.5, frame_bgr, 0.5, 0)
-        
-        out_video.write(frame_bgr)
+            ret, frame_bgr = video.read()
+            if ret:
+                mask = model.process_frame(model.frame_to_tensor(frame_bgr))
 
     video.release()
     out_video.release()

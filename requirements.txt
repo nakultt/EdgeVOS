@@ -18,6 +18,7 @@ open_clip_torch>=2.26.0    # MobileCLIP2-S2
 ftfy==6.1.1
 regex
 iopath>=0.1.10
+psutil
 
 # Graph (STGP)
 networkx>=3.3
