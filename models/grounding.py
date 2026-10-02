@@ -83,7 +83,7 @@ class CLIPGrounder:
     """
 
     def __init__(self, clip_model, preprocess, tokenizer, device: str = "cuda",
-                 scales=(0.15, 0.25, 0.35, 0.5, 0.7), stride_ratio: float = 0.33):
+                 scales=(0.2, 0.3, 0.45, 0.65), stride_ratio: float = 0.5):
         self.clip_model = clip_model
         self.tokenizer = tokenizer
         self.device = device
@@ -112,7 +112,7 @@ class CLIPGrounder:
         boxes = []
         side = min(H, W)
         for s in self.scales:
-            for aspect in (1.0, 1.5, 0.67):
+            for aspect in (1.0, 1.6):
                 bw = int(min(W, side * s * aspect ** 0.5))
                 bh = int(min(H, side * s / aspect ** 0.5))
                 sx = max(1, int(bw * self.stride_ratio))
